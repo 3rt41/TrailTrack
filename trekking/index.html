@@ -155,45 +155,49 @@
     </div>
     <div class="detail-body">
       <div class="detail-meta" id="detailMeta"></div>
+      <div class="dash">
 
-      <!-- 1. sintesi in una frase + livello di sforzo -->
-      <section class="hero" id="dHero"></section>
+        <!-- In sintesi -->
+        <section class="card hero span2" id="dHero"></section>
 
-      <!-- 2. i quattro numeri che contano -->
-      <section class="kpis" id="dKpis"></section>
-      <div class="mini-stats" id="dMini"></div>
+        <!-- Percorso -->
+        <section class="card" id="cRoute">
+          <h3 class="card-title">🗺 Percorso</h3>
+          <div class="map-wrap detail-map" id="dMapWrap">
+            <div id="detailMap" class="map"></div>
+            <div class="map-legend" id="dLegend"><span>bassa</span><i></i><span>alta</span></div>
+          </div>
+          <div class="cells" id="gRoute"></div>
+        </section>
 
-      <!-- 3. mappa colorata per quota -->
-      <div class="map-wrap detail-map" id="dMapWrap">
-        <div id="detailMap" class="map"></div>
-        <div class="map-legend" id="dLegend"><span>bassa</span><i></i><span>alta</span></div>
-      </div>
+        <!-- Dislivello -->
+        <section class="card" id="elevPanel">
+          <div class="card-title row-between"><h3>⛰ Dislivello</h3><span class="hint" id="elevSrc"></span></div>
+          <div class="cells" id="gElev"></div>
+          <div class="chart-wrap" id="elevWrap"><canvas id="elevChart"></canvas><div class="chart-tip" id="elevTip"></div></div>
+          <p class="hint" id="elevNote"></p>
+        </section>
 
-      <!-- 4. profilo altimetrico -->
-      <div class="panel" id="elevPanel">
-        <div class="row-between"><h3>⛰ Profilo altimetrico</h3><span class="hint" id="elevSrc"></span></div>
-        <div class="chart-wrap" id="elevWrap"><canvas id="elevChart"></canvas><div class="chart-tip" id="elevTip"></div></div>
-        <p class="hint" id="elevNote"></p>
-      </div>
+        <!-- Salute -->
+        <section class="card" id="hrPanel">
+          <h3 class="card-title">♥ Salute</h3>
+          <div class="cells" id="gHealth"></div>
+          <div id="dZones" class="zone-list"></div>
+          <div class="chart-wrap small" id="hrWrap"><canvas id="hrChart"></canvas><div class="chart-tip" id="hrTip"></div></div>
+          <p class="hint" id="hrNote"></p>
+        </section>
 
-      <!-- 5. cuore -->
-      <div class="panel" id="hrPanel">
-        <div class="row-between"><h3>♥ Cuore</h3><span class="hint" id="hrSummary"></span></div>
-        <div class="effort-bar" id="dEffortBar"></div>
-        <div class="effort-legend" id="dEffortLegend"></div>
-        <div class="chart-wrap small"><canvas id="hrChart"></canvas><div class="chart-tip" id="hrTip"></div></div>
-      </div>
+        <!-- Ritmo -->
+        <section class="card" id="splitsPanel">
+          <h3 class="card-title">⏱ Ritmo km per km</h3>
+          <div id="splitsBars" class="split-bars"></div>
+        </section>
 
-      <!-- 6. consigli -->
-      <div class="panel" id="tipsPanel">
-        <h3>💡 Cosa ti dice questa uscita</h3>
-        <ul class="tips" id="dTips"></ul>
-      </div>
-
-      <!-- 7. parziali -->
-      <div class="panel" id="splitsPanel">
-        <h3>⏱ Chilometro per chilometro</h3>
-        <div id="splitsBars" class="split-bars"></div>
+        <!-- Consigli -->
+        <section class="card span2" id="tipsPanel">
+          <h3 class="card-title">💡 Cosa ti dice questo allenamento</h3>
+          <ul class="tips" id="dTips"></ul>
+        </section>
       </div>
 
       <div class="detail-actions">

@@ -787,10 +787,10 @@ function lineChart(canvas, tip, xs, ys, { color = '#5bd18b', fill = true, unitX 
 
 // ───────────────────────── Dettaglio attività (riepilogo "a colpo d'occhio") ─────────────────────────
 const EFFORT = [
-  { label: 'Facile', color: '#5bd18b' },
-  { label: 'Moderata', color: '#e6d14b' },
-  { label: 'Impegnativa', color: '#f29b4b' },
-  { label: 'Molto impegnativa', color: '#ef5b6b' },
+  { label: 'Facile', short: 'Leggero', color: '#5bd18b' },
+  { label: 'Moderato', short: 'Moderato', color: '#e6d14b' },
+  { label: 'Impegnativo', short: 'Alto', color: '#f29b4b' },
+  { label: 'Molto impegnativo', short: 'Molto alto', color: '#ef5b6b' },
 ];
 /* Sforzo: dal battito medio se c'è, altrimenti da "km-sforzo" (km + 100 m di salita = 1 km). */
 function effortOf(a, st) {
@@ -823,6 +823,31 @@ function heartBands(st) {
   ];
 }
 
+/* Dati di salita: quota di partenza/arrivo, pendenza media e massima, velocità di salita (VAM). */
+function climbStats(act, st) {
+  const pts = act.points, alts = st.alts, cum = st.cum;
+  let upDist = 0, upMs = 0, maxGrade = null, j = 0;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].seg !== pts[i - 1].seg || alts[i] == null || alts[i - 1] == null) continue;
+    const dh = alts[i] - alts[i - 1];
+    if (dh > 0) { upDist += cum[i] - cum[i - 1]; upMs += pts[i].mt - pts[i - 1].mt; }
+    while (j < i && cum[i] - cum[j + 1] >= 100) j++;
+    if (cum[i] - cum[j] >= 100 && alts[j] != null && pts[j].seg === pts[i].seg) {
+      const g = (100 * (alts[i] - alts[j])) / (cum[i] - cum[j]);
+      if (g > 0) maxGrade = Math.max(maxGrade ?? 0, g);
+    }
+  }
+  return {
+    startAlt: alts.find((v) => v != null) ?? null,
+    endAlt: st.altLast ?? null,
+    avgGrade: upDist > 50 ? (100 * st.gain) / upDist : null,
+    maxGrade,
+    vam: upMs > 120000 && st.gain > 20 ? st.gain / (upMs / 3600000) : null,
+  };
+}
+const vamLabel = (v) => (v < 300 ? 'passo tranquillo' : v < 500 ? 'buon passo' : v < 800 ? 'passo sostenuto' : 'da allenato');
+const waterL = (st) => Math.max(0.3, Math.round((0.5 * (st.movingMs / 3600000) + st.gain / 1500) * 10) / 10);
+
 const Detail = {
   map: null, layers: null, act: null, st: null, hoverMarker: null, charts: [], demState: '',
   async open(id) {
@@ -845,60 +870,88 @@ const Detail = {
   },
   renderSummary() {
     const a = this.act, st = this.st, t = TYPES[a.type], gps = t.gps && a.points.length > 1;
-    const eff = EFFORT[effortOf(a, st)];
+    const effIdx = effortOf(a, st), eff = EFFORT[effIdx];
     const gain = Math.round(st.gain), loss = Math.round(st.loss);
+    const cell = (label, value, sub = '', cls = '') => `<div class="cell ${cls}"><span class="lbl">${label}</span><span class="val">${value}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</div>`;
+    const u = (x) => `<small>${x}</small>`;
+    const speedVal = (v) => (t.speedUnit === 'speed' ? `${fmtSpeed(v)}${u(' km/h')}` : `${fmtPace(v)}${u(' /km')}`);
 
-    // 1. frase di sintesi
+    // ── In sintesi: sforzo, frase, 4 numeri principali
     const verb = { hike: 'Hai percorso', walk: 'Hai camminato per', run: 'Hai corso per', bike: 'Hai pedalato per', workout: `Ti sei ${gx('allenato', 'allenata')} per` }[a.type];
-    let sentence = a.type === 'workout' || !gps
-      ? `${verb} <b>${fmtHM(st.movingMs)}</b>`
-      : `${verb} <b>${fmtKmIt(st.distance)} km</b> in <b>${fmtHM(st.movingMs)}</b>`;
-    if (gps && gain >= 15) sentence += `, salendo di <b>${gain} m</b> — come ${Math.max(1, Math.round(gain / 3))} piani di scale`;
+    let sentence = gps ? `${verb} <b>${fmtKmIt(st.distance)} km</b> in <b>${fmtHM(st.movingMs)}</b>` : `${verb} <b>${fmtHM(st.movingMs)}</b>`;
+    if (gps && gain >= 15) sentence += `, salendo di <b>${gain} m</b> (come ${Math.max(1, Math.round(gain / 3))} piani di scale)`;
     sentence += '.';
-    const stops = a.pauses.filter((p) => p.end && p.end - p.start >= 30000);
-    const stopLine = st.pausedMs >= 60000
-      ? `Ti sei ${gx('fermato', 'fermata')} ${stops.length > 1 ? `${stops.length} volte` : 'una volta'}, ${fmtHM(st.pausedMs)} in tutto (uscita completa: ${fmtHM(st.totalMs)}).`
-      : 'Praticamente senza soste.';
-    $('#dHero').innerHTML = `
-      <div class="effort-pill" style="--c:${eff.color}">Uscita ${eff.label.toLowerCase()}</div>
-      <p class="hero-text">${sentence}</p>
-      <p class="hero-sub">${stopLine}</p>`;
-
-    // 2. numeri chiave
-    const speedTxt = t.speedUnit === 'speed' ? `${fmtSpeed(st.avgSpeed)} km/h di media` : `${fmtPace(st.avgSpeed)} min/km`;
-    const kpis = [
-      gps ? ['Distanza', `${fmtKmIt(st.distance)}<small> km</small>`, speedTxt] : ['Durata', fmtHM(st.totalMs), ''],
-      ['In movimento', fmtDur(st.movingMs), `su ${fmtDur(st.totalMs)} totali`],
-      gps ? ['Salita', `<span class="up">↑ ${gain}</span><small> m</small>`, `discesa ↓ ${loss} m`] : ['Calorie', `${st.kcal}<small> kcal</small>`, ''],
-      st.hrAvg ? ['Battito medio', `<span class="hr">♥ ${st.hrAvg}</span><small> bpm</small>`, `massimo ${st.hrMax} bpm`] : ['Calorie', `${st.kcal}<small> kcal</small>`, 'stima'],
+    const head = [
+      gps ? ['Distanza', `${fmtKmIt(st.distance)}${u(' km')}`] : ['Durata', fmtHM(st.totalMs)],
+      ['Tempo', fmtDur(st.movingMs)],
+      gps ? ['Salita', `<span class="up">↑${gain}</span>${u(' m')}`] : ['Calorie', `${st.kcal}${u(' kcal')}`],
+      st.hrAvg ? ['Battito', `<span class="hr">♥${st.hrAvg}</span>${u(' bpm')}`] : ['Calorie', `${st.kcal}${u(' kcal')}`],
     ];
-    $('#dKpis').innerHTML = kpis.map(([l, v, s]) => `<div class="kpi"><span class="lbl">${l}</span><span class="val">${v}</span>${s ? `<span class="sub">${s}</span>` : ''}</div>`).join('');
-    const mini = [];
-    if (st.hrAvg || !gps) mini.push(`🔥 ${st.kcal} kcal <small>≈ ${Math.max(1, Math.round(st.kcal / 230))} cornett${Math.round(st.kcal / 230) > 1 ? 'i' : 'o'}</small>`);
-    else mini.push(`🥐 ≈ ${Math.max(1, Math.round(st.kcal / 230))} cornett${Math.round(st.kcal / 230) > 1 ? 'i' : 'o'} <small>bruciati</small>`);
-    if (gps && st.altMax != null) mini.push(`⛰ ${Math.round(st.altMax)} m <small>quota max</small>`);
-    if (gps && t.speedUnit === 'pace') mini.push(`🚀 ${fmtSpeed(st.avgSpeed)} km/h <small>media</small>`);
-    $('#dMini').innerHTML = mini.map((m) => `<span>${m}</span>`).join('');
+    $('#dHero').innerHTML = `
+      <div class="row-between"><div class="effort-pill" style="--c:${eff.color}">Allenamento ${eff.label.toLowerCase()}</div><span class="hint">${TYPES[a.type].icon} ${TYPES[a.type].label}</span></div>
+      <p class="hero-text">${sentence}</p>
+      <div class="headline">${head.map(([l, v]) => `<div><span class="lbl">${l}</span><span class="val">${v}</span></div>`).join('')}</div>`;
 
-    // 3-4. mappa e profilo
+    // ── Percorso
+    $('#cRoute').classList.toggle('no-map', !gps);
     $('#dMapWrap').classList.toggle('hidden', !gps);
-    $('#elevPanel').classList.toggle('hidden', !gps);
+    const stops = a.pauses.filter((p) => p.end && p.end - p.start >= 30000);
+    const route = [];
+    if (gps) {
+      route.push(cell('Distanza', `${fmtKmIt(st.distance)}${u(' km')}`));
+      route.push(cell(t.speedUnit === 'speed' ? 'Velocità media' : 'Passo medio', speedVal(st.avgSpeed), t.speedUnit === 'speed' ? '' : `${fmtSpeed(st.avgSpeed)} km/h`));
+      route.push(cell(t.speedUnit === 'speed' ? 'Vel. max' : 'Passo top', speedVal(st.maxSpeed), 'il tratto più veloce'));
+    }
+    route.push(cell('In movimento', fmtDur(st.movingMs)));
+    route.push(cell('Totale', fmtDur(st.totalMs), `${fmtTime(a.startTime)} → ${fmtTime(a.endTime || a.startTime + st.totalMs)}`));
+    route.push(cell('Soste', stops.length ? `${stops.length}${u(stops.length > 1 ? ' soste' : ' sosta')}` : '0', st.pausedMs >= 60000 ? `${fmtHM(st.pausedMs)} fermo` : 'nessuna pausa lunga'));
+    $('#gRoute').innerHTML = route.join('');
 
-    // 5. cuore
-    $('#hrPanel').classList.toggle('hidden', !a.hr?.length);
-    if (a.hr?.length) {
-      const bands = heartBands(st), tot = bands.reduce((s, b) => s + b.ms, 0) || 1;
-      $('#hrSummary').textContent = `media ${st.hrAvg} · max ${st.hrMax} bpm`;
-      $('#dEffortBar').innerHTML = bands.map((b) => `<i style="width:${(100 * b.ms / tot).toFixed(1)}%;background:${b.color}"></i>`).join('');
-      $('#dEffortLegend').innerHTML = bands.map((b) => `<span><b style="color:${b.color}">●</b> ${b.label} <small>(${b.hint})</small> <em>${fmtHM(b.ms)}</em></span>`).join('');
+    // ── Dislivello
+    $('#elevPanel').classList.toggle('hidden', !gps);
+    if (gps) {
+      const c = climbStats(a, st);
+      $('#gElev').innerHTML = [
+        cell('Salita', `<span class="up">↑ ${gain}</span>${u(' m')}`, `${Math.max(1, Math.round(gain / 3))} piani`),
+        cell('Discesa', `<span class="down">↓ ${loss}</span>${u(' m')}`),
+        cell('Quota max', st.altMax != null ? `${Math.round(st.altMax)}${u(' m')}` : '--', st.altMin != null ? `min ${Math.round(st.altMin)} m` : ''),
+        cell('Partenza', c.startAlt != null ? `${Math.round(c.startAlt)}${u(' m')}` : '--', c.endAlt != null ? `arrivo ${Math.round(c.endAlt)} m` : ''),
+        cell('Pendenza', c.avgGrade != null ? `${c.avgGrade.toFixed(0)}${u(' %')}` : '--', c.maxGrade != null ? `media · max ${c.maxGrade.toFixed(0)}%` : 'media in salita'),
+        cell('Salita/ora', c.vam ? `${Math.round(c.vam)}${u(' m')}` : '--', c.vam ? vamLabel(c.vam) : 'metri saliti in 1 h'),
+      ].join('');
     }
 
-    // 6. consigli
-    $('#dTips').innerHTML = this.tips(a, st, effortOf(a, st)).map((x) => `<li><span>${x[0]}</span><p>${x[1]}</p></li>`).join('');
+    // ── Salute
+    const hasHr = !!a.hr?.length;
+    const health = [];
+    if (hasHr) {
+      const hrMin = Math.min(...a.hr.map((h) => h.bpm));
+      health.push(cell('FC media', `<span class="hr">${st.hrAvg}</span>${u(' bpm')}`, `${Math.round((100 * st.hrAvg) / maxHr())}% del max`));
+      health.push(cell('FC max', `<span class="hr">${st.hrMax}</span>${u(' bpm')}`, `minima ${hrMin}`));
+    }
+    health.push(cell('Calorie', `${st.kcal}${u(' kcal')}`, `≈ ${Math.max(1, Math.round(st.kcal / 230))} cornett${Math.round(st.kcal / 230) > 1 ? 'i' : 'o'}`));
+    health.push(cell('Sforzo', `<span style="color:${eff.color}">${eff.short}</span>`, hasHr ? 'dal battito' : 'stimato', 'txt'));
+    health.push(cell('Recupero', ['12 h', '24 h', '36 h', '48 h'][effIdx], 'di riposo'));
+    health.push(cell('Acqua', `${waterL(st).toLocaleString('it-IT')}${u(' L')}`, 'da portare'));
+    if (st.rmssd) health.push(cell('HRV', `${st.rmssd}${u(' ms')}`, 'alta = riposato'));
+    $('#gHealth').innerHTML = health.join('');
+    const ztot = st.zoneMs.reduce((x, y) => x + y, 0);
+    $('#dZones').innerHTML = hasHr && ztot ? `<div class="zone-head">Tempo nelle zone cardiache</div>` + ZONES.map((z, i) => {
+      const pct = (100 * st.zoneMs[i]) / ztot;
+      return `<div class="zrow"><span class="zn" style="color:${z.color}">${z.name}</span><span class="zl">${z.label}<small> ${Math.round(z.from * maxHr())}+</small></span>
+        <div class="zbar"><i style="width:${pct.toFixed(1)}%;background:${z.color}"></i></div><span class="zt">${fmtHM(st.zoneMs[i])}</span></div>`;
+    }).join('') : '';
+    $('#hrWrap').classList.toggle('hidden', !hasHr);
+    $('#hrNote').innerHTML = hasHr
+      ? 'Z1–Z2: ritmo in cui riesci a parlare (costruisce resistenza) · Z3: fiato più corto · Z4–Z5: intenso, parli a fatica.'
+      : 'Collega la Mi Band nella scheda <b>Salute</b> per vedere battito, zone cardiache e uno sforzo più preciso.';
 
-    // 7. km per km
+    // ── Consigli
+    $('#dTips').innerHTML = this.tips(a, st, effIdx).map((x) => `<li><span>${x[0]}</span><p>${x[1]}</p></li>`).join('');
+
+    // ── Ritmo km per km
     const sp = st.splits.filter((s) => s.ms > 0);
-    $('#splitsPanel').classList.toggle('hidden', !gps || sp.length < 2);
+    $('#splitsPanel').classList.toggle('hidden', !gps || sp.length < 1);
     if (sp.length) {
       const speeds = sp.map((s) => s.dist / (s.ms / 1000)), vmax = Math.max(...speeds);
       const best = speeds.indexOf(vmax);
@@ -907,8 +960,9 @@ const Detail = {
         const lab = t.speedUnit === 'speed' ? `${fmtSpeed(v)} km/h` : `${fmtPace(v)} /km`;
         return `<div class="split-row"><span class="k">${s.partial ? fmtKmIt(s.km * 1000) : s.km}</span>
           <div class="sbar"><i style="width:${(100 * v / vmax).toFixed(0)}%" class="${i === best ? 'best' : ''}"></i><b>${lab}</b></div>
-          <span class="d ${s.dAlt > 0 ? 'up' : 'down'}">${s.dAlt == null ? '' : (s.dAlt >= 0 ? '↑' : '↓') + Math.abs(Math.round(s.dAlt))}</span></div>`;
-      }).join('') + '<p class="hint">Barra più lunga = chilometro più veloce. A destra la salita/discesa di quel km.</p>';
+          <span class="d ${s.dAlt > 0 ? 'up' : 'down'}">${s.dAlt == null ? '' : (s.dAlt >= 0 ? '↑' : '↓') + Math.abs(Math.round(s.dAlt))}</span>
+          <span class="h">${s.hr ? '♥' + s.hr : ''}</span></div>`;
+      }).join('') + '<p class="hint">Barra più lunga = km più veloce · a destra salita/discesa e battito medio del km.</p>';
     }
   },
   /* Consigli pratici per chi inizia. */
@@ -929,10 +983,8 @@ const Detail = {
         : easy >= 0.7
           ? `Hai tenuto un ritmo <b>facile</b> per quasi tutta l'uscita: è il modo migliore per costruire resistenza.`
           : `Sforzo ben distribuito: buona parte a ritmo medio, poco tempo al limite.`]);
-    } else {
-      out.push(['❤️', 'Collega la Mi Band (scheda Salute) per sapere quanto ti sei sforzato davvero.']);
     }
-    const water = Math.max(0.3, Math.round((0.5 * h + st.gain / 1500) * 10) / 10);
+    const water = waterL(st);
     out.push(['💧', `Per un'uscita così porta almeno <b>${water.toLocaleString('it-IT')} L d'acqua</b>, di più se fa caldo.`]);
     if (gps && st.loss > 300) out.push(['🦵', `<b>${Math.round(st.loss)} m di discesa</b>: è la parte che affatica di più le ginocchia. I bastoncini aiutano molto.`]);
     out.push(['😴', [
@@ -994,7 +1046,7 @@ const Detail = {
     $('#elevSrc').textContent = hasAlt ? (a.demApplied ? 'quote del terreno' : 'quote GPS') : '';
     if (hasAlt) {
       this.charts.push(lineChart($('#elevChart'), $('#elevTip'), Array.from(st.cum), st.alts, { color: '#f29b4b', onHover: (i) => this.hover(i) }));
-      $('#elevNote').innerHTML = `Da <b>${Math.round(st.alts.find((v) => v != null))} m</b> a <b>${Math.round(st.altLast)} m</b> · punto più alto <b>${Math.round(st.altMax)} m</b>. Scorri il grafico: il punto si muove sulla mappa.`
+      $('#elevNote').innerHTML = 'Scorri il grafico col dito: il punto si muove sulla mappa.'
         + (this.demState === 'loading' ? ' <i>Sto scaricando le quote del terreno per un profilo più preciso…</i>' : '');
     } else {
       $('#elevNote').innerHTML = this.demState === 'loading'
