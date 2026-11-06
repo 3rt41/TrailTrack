@@ -276,6 +276,8 @@ const SimGeo = {
 };
 
 // ───────────────────────── Battito: Web Bluetooth ─────────────────────────
+const BAND_NAMES = ['Mi Smart Band', 'Mi Band', 'Xiaomi Smart Band', 'Amazfit', 'Redmi Smart Band'];
+const isMiBand = (n = '') => /mi (smart )?band|xiaomi|redmi/i.test(n);
 const HR = {
   device: null, char: null, bpm: null, lastAt: 0, battery: null, rr: [], listeners: new Set(), sim: null, tries: 0,
   get supported() { return !!navigator.bluetooth; },
@@ -286,9 +288,11 @@ const HR = {
   async connect() {
     if (settings.demo) { this.startSim(); return; }
     if (!this.supported) throw new Error('Web Bluetooth non disponibile in questo browser');
+    // Molte band (es. Xiaomi Mi Band 5/6/7, Amazfit) non annunciano il servizio cardiaco
+    // nella pubblicità Bluetooth: le cerchiamo anche per nome.
     this.device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: ['heart_rate'] }],
-      optionalServices: ['battery_service', 'device_information'],
+      filters: [{ services: ['heart_rate'] }, ...BAND_NAMES.map((namePrefix) => ({ namePrefix }))],
+      optionalServices: ['heart_rate', 'battery_service', 'device_information'],
     });
     this.device.addEventListener('gattserverdisconnected', () => this.onDisconnect());
     this.tries = 0;
@@ -296,7 +300,14 @@ const HR = {
   },
   async setup() {
     const server = await this.device.gatt.connect();
-    const svc = await server.getPrimaryService('heart_rate');
+    let svc;
+    try { svc = await server.getPrimaryService('heart_rate'); }
+    catch {
+      server.disconnect();
+      throw new Error(isMiBand(this.device.name)
+        ? 'La Mi Band non condivide il battito. Attiva "Condivisione frequenza cardiaca" nell\'app Zepp Life / Mi Fitness e riprova.'
+        : 'Questo dispositivo non espone il servizio Bluetooth della frequenza cardiaca.');
+    }
     this.char = await svc.getCharacteristic('heart_rate_measurement');
     this.char.addEventListener('characteristicvaluechanged', (e) => this.parse(e.target.value));
     await this.char.startNotifications();
@@ -972,7 +983,8 @@ const Health = {
     this.log = (await DB.kvGet('healthLog')) || [];
     HR.on(() => this.renderLive());
     $('#bandConnect').onclick = async () => {
-      try { await HR.connect(); toast(`Collegato: ${HR.name}`); } catch (e) { if (e.name !== 'NotFoundError') toast(e.message, 4000); }
+      try { await HR.connect(); toast(`Collegato: ${HR.name}`); }
+      catch (e) { HR.device = null; HR.emit(); if (e.name !== 'NotFoundError') dialog(e.message, [{ label: 'OK', value: 1, cls: 'btn-primary' }]); }
     };
     $('#bandDisconnect').onclick = () => HR.disconnect();
     $('#restMeasure').onclick = () => this.measureRest();
@@ -999,7 +1011,7 @@ const Health = {
     $('#bandHint').textContent = settings.demo
       ? 'Modalità demo attiva: il battito è simulato.'
       : HR.supported
-        ? 'Funziona con qualsiasi fascia/band che trasmette la frequenza cardiaca via Bluetooth standard (Polar, Garmin, Wahoo, Coros, Amazfit/Xiaomi con "Trasmissione FC" attiva…).'
+        ? 'Mi Band 6: nell\'app Zepp Life (o Mi Fitness) → Profilo → la tua band → attiva "Condivisione frequenza cardiaca". Poi, per un battito continuo, avvia un allenamento anche sulla band. Funziona anche con fasce Polar, Garmin, Wahoo, Coros e altre band Bluetooth standard.'
         : 'Il tuo browser non supporta Web Bluetooth (es. Safari su iPhone). Usa Chrome su Android/PC, oppure importa i GPX con battito dall\'app della tua band (Storico → Importa GPX).';
   },
   async measureRest() {

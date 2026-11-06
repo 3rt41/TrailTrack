@@ -25,5 +25,14 @@ In *Impostazioni* c'è una **modalità demo** che simula GPS e battito per prova
 ## Limiti da conoscere
 - Le web app non registrano il GPS con lo schermo spento: l'app tiene lo schermo acceso durante
   l'attività (Wake Lock). Puoi abbassare la luminosità, ma non bloccare il telefono.
-- Il Bluetooth web funziona su **Chrome per Android / PC**, non su Safari iPhone. Su Mi Band / Amazfit
-  attiva "Trasmissione frequenza cardiaca" nell'app della band. In alternativa importa i GPX dall'app della band.
+- Il Bluetooth web funziona su **Chrome per Android / PC**, non su Safari iPhone.
+
+## Collegare la Xiaomi Mi Band 6
+1. Nell'app **Zepp Life** (o **Mi Fitness**, a seconda di come l'hai associata): Profilo → *Mi Smart Band 6* →
+   attiva **"Condivisione frequenza cardiaca"** (Heart rate sharing).
+2. Sulla band avvia un **allenamento** (es. *Camminata all'aperto*): così misura il battito ogni secondo
+   invece che ogni qualche minuto.
+3. In TrailTrack: *Salute* → **Collega band** → scegli *Mi Smart Band 6*.
+
+L'app legge solo il battito (e l'HRV, se la band invia gli intervalli R-R). Passi, sonno, SpO₂ e stress della
+Mi Band sono cifrati con una chiave di Xiaomi e non sono leggibili da un'app esterna.
