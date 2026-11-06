@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>TrailTrack</title>
+  <meta name="description" content="Traccia allenamenti e trekking: GPS, dislivelli, pausa automatica, mappa e frequenza cardiaca dalla tua band." />
+  <meta name="theme-color" content="#0f1a14" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="icon.svg" alt="" width="26" height="26" /> TrailTrack</div>
+    <div class="top-status">
+      <span id="hrBadge" class="badge hidden" title="Frequenza cardiaca">♥ <b id="hrBadgeVal">--</b></span>
+      <span id="gpsBadge" class="badge gps-off" title="Precisione GPS">GPS --</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ REGISTRA ============ -->
+    <section id="view-record" class="view active">
+      <div class="map-wrap">
+        <div id="liveMap" class="map"></div>
+        <button id="followBtn" class="map-btn active" title="Segui posizione">◎</button>
+        <div id="statusPill" class="status-pill hidden">●</div>
+      </div>
+
+      <div id="preStart" class="panel">
+        <h2>Nuova attività</h2>
+        <div class="type-picker" id="typePicker"></div>
+        <button id="startBtn" class="btn btn-primary btn-big">▶ Avvia</button>
+        <p class="hint" id="startHint">Il GPS viene attivato all'avvio. Tieni l'app aperta (lo schermo resta acceso automaticamente).</p>
+      </div>
+
+      <div id="liveStats" class="panel hidden">
+        <div class="stat-grid live">
+          <div class="stat big"><span class="lbl">Tempo totale</span><span class="val" id="sTotal">0:00:00</span></div>
+          <div class="stat big"><span class="lbl">In movimento</span><span class="val" id="sMoving">0:00:00</span></div>
+          <div class="stat"><span class="lbl">Distanza</span><span class="val" id="sDist">0.00<small> km</small></span></div>
+          <div class="stat"><span class="lbl" id="sSpeedLbl">Passo medio</span><span class="val" id="sSpeed">--</span></div>
+          <div class="stat"><span class="lbl">Dislivello +</span><span class="val up" id="sGain">0<small> m</small></span></div>
+          <div class="stat"><span class="lbl">Dislivello −</span><span class="val down" id="sLoss">0<small> m</small></span></div>
+          <div class="stat"><span class="lbl">Altitudine</span><span class="val" id="sAlt">--</span></div>
+          <div class="stat"><span class="lbl">Freq. cardiaca</span><span class="val hr" id="sHr">--</span></div>
+        </div>
+        <div class="controls">
+          <button id="pauseBtn" class="btn btn-warn">❚❚ Pausa</button>
+          <button id="stopBtn" class="btn btn-danger">■ Stop</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ STORICO ============ -->
+    <section id="view-history" class="view">
+      <div class="panel">
+        <h2>Storico</h2>
+        <div id="historyFilter" class="chips" role="tablist" aria-label="Filtra per tipo"></div>
+        <div id="historyTotals" class="totals"></div>
+        <div id="historyList" class="history-list"></div>
+        <label class="btn btn-ghost file-btn">⤒ Importa GPX
+          <input type="file" id="gpxImport" accept=".gpx,application/gpx+xml" multiple hidden />
+        </label>
+      </div>
+    </section>
+
+    <!-- ============ SALUTE ============ -->
+    <section id="view-health" class="view">
+      <div class="panel">
+        <h2>Band / Cardiofrequenzimetro</h2>
+        <div id="bandBox" class="band-box">
+          <div class="hr-live">
+            <div class="hr-heart" id="hrHeart">♥</div>
+            <div><div class="hr-num" id="hrLive">--</div><div class="hr-unit">bpm</div></div>
+            <div class="hr-zone" id="hrZone"></div>
+          </div>
+          <div class="band-info" id="bandInfo">Nessun dispositivo collegato</div>
+          <div class="controls">
+            <button id="bandConnect" class="btn btn-primary">Collega band</button>
+            <button id="bandDisconnect" class="btn btn-ghost hidden">Scollega</button>
+          </div>
+          <p class="hint" id="bandHint"></p>
+          <details class="diag"><summary>Diagnostica connessione</summary><div id="bandDiag" class="diag-log">Nessun tentativo ancora.</div></details>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Misure di salute</h2>
+        <div class="stat-grid">
+          <div class="stat"><span class="lbl">FC a riposo</span><span class="val" id="hRest">--</span></div>
+          <div class="stat"><span class="lbl">HRV (RMSSD)</span><span class="val" id="hHrv">--</span></div>
+          <div class="stat"><span class="lbl">FC max</span><span class="val" id="hMax">--</span></div>
+          <div class="stat"><span class="lbl">Batteria band</span><span class="val" id="hBatt">--</span></div>
+        </div>
+        <button id="restMeasure" class="btn btn-ghost btn-block">⏱ Misura FC a riposo e HRV (60 s)</button>
+        <p class="hint">Stai seduto/a e fermo/a per un minuto. Le misure vengono salvate nello storico salute.</p>
+        <div id="healthLog" class="health-log"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Riepilogo</h2>
+        <div id="healthSummary"></div>
+        <h3>Zone cardiache</h3>
+        <div id="zoneLegend" class="zone-legend"></div>
+      </div>
+    </section>
+
+    <!-- ============ IMPOSTAZIONI ============ -->
+    <section id="view-settings" class="view">
+      <div class="panel">
+        <h2>Profilo</h2>
+        <div class="form-grid">
+          <label>Peso (kg)<input type="number" id="setWeight" min="30" max="250" step="0.5" /></label>
+          <label>Età<input type="number" id="setAge" min="10" max="100" /></label>
+          <label>Sesso<select id="setSex"><option value="m">Uomo</option><option value="f">Donna</option></select></label>
+          <label>FC max (vuoto = auto)<input type="number" id="setMaxHr" min="100" max="230" placeholder="auto" /></label>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Registrazione</h2>
+        <label class="switch"><input type="checkbox" id="setAutoPause" /> Pausa automatica</label>
+        <label class="switch"><input type="checkbox" id="setWake" /> Mantieni schermo acceso durante l'attività</label>
+        <label class="switch"><input type="checkbox" id="setVibrate" /> Vibra su pausa / ripresa</label>
+        <div class="form-grid">
+          <label>Precisione GPS minima (m)<input type="number" id="setMaxAcc" min="5" max="100" /></label>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDemo" /> Modalità demo (GPS e battito simulati)</label>
+        <p class="hint">La modalità demo serve a provare l'app da computer, senza muoversi.</p>
+      </div>
+      <div class="panel">
+        <h2>Dati</h2>
+        <p class="hint">Tutto resta sul tuo dispositivo (IndexedDB). Fai un backup ogni tanto.</p>
+        <div class="controls">
+          <button id="backupBtn" class="btn btn-ghost">⤓ Esporta backup</button>
+          <label class="btn btn-ghost file-btn">⤒ Ripristina backup
+            <input type="file" id="restoreInput" accept=".json,application/json" hidden />
+          </label>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ DETTAGLIO ============ -->
+  <div id="detail" class="detail hidden" role="dialog" aria-modal="true">
+    <div class="detail-head">
+      <button id="detailBack" class="icon-btn" aria-label="Indietro">←</button>
+      <input id="detailName" class="detail-name" aria-label="Nome attività" />
+      <button id="detailMenuBtn" class="icon-btn" aria-label="Esporta GPX">⤓</button>
+    </div>
+    <div class="detail-body">
+      <div class="detail-meta" id="detailMeta"></div>
+      <div class="dash">
+
+        <!-- In sintesi -->
+        <section class="card hero span2" id="dHero"></section>
+
+        <!-- Percorso -->
+        <section class="card" id="cRoute">
+          <h3 class="card-title">🗺 Percorso</h3>
+          <p class="notrack hidden" id="dNoTrack"></p>
+          <div class="map-wrap detail-map" id="dMapWrap">
+            <div id="detailMap" class="map"></div>
+            <div class="map-legend" id="dLegend"><span>bassa</span><i></i><span>alta</span></div>
+          </div>
+          <div class="cells" id="gRoute"></div>
+        </section>
+
+        <!-- Dislivello -->
+        <section class="card" id="elevPanel">
+          <div class="card-title row-between"><h3>⛰ Dislivello</h3><span class="hint" id="elevSrc"></span></div>
+          <div class="cells" id="gElev"></div>
+          <div class="chart-wrap" id="elevWrap"><canvas id="elevChart"></canvas><div class="chart-tip" id="elevTip"></div></div>
+          <p class="hint" id="elevNote"></p>
+        </section>
+
+        <!-- Salute -->
+        <section class="card" id="hrPanel">
+          <h3 class="card-title">♥ Salute</h3>
+          <div class="cells" id="gHealth"></div>
+          <div id="dZones" class="zone-list"></div>
+          <div class="chart-wrap small" id="hrWrap"><canvas id="hrChart"></canvas><div class="chart-tip" id="hrTip"></div></div>
+          <p class="hint" id="hrNote"></p>
+        </section>
+
+        <!-- Ritmo -->
+        <section class="card" id="splitsPanel">
+          <h3 class="card-title">⏱ Ritmo km per km</h3>
+          <div id="splitsBars" class="split-bars"></div>
+        </section>
+
+        <!-- Consigli -->
+        <section class="card span2" id="tipsPanel">
+          <h3 class="card-title">💡 Cosa ti dice questo allenamento</h3>
+          <ul class="tips" id="dTips"></ul>
+        </section>
+      </div>
+
+      <div class="detail-actions">
+        <button id="gpxBtn" class="btn btn-ghost">⤓ Esporta GPX</button>
+        <button id="deleteBtn" class="btn btn-danger-ghost">🗑 Elimina</button>
+      </div>
+    </div>
+  </div>
+
+  <nav class="tabbar">
+    <button data-view="record" class="active"><span>●</span>Registra</button>
+    <button data-view="history"><span>☰</span>Storico</button>
+    <button data-view="health"><span>♥</span>Salute</button>
+    <button data-view="settings"><span>⚙</span>Impostazioni</button>
+  </nav>
+
+  <div id="toast" class="toast"></div>
+  <div id="modal" class="modal hidden"><div class="modal-card"><p id="modalText"></p><div class="controls wrap" id="modalBtns"></div></div></div>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

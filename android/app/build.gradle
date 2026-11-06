@@ -1,0 +1,82 @@
+import javax.inject.Inject
+
+plugins {
+    id 'com.android.application'
+}
+
+// Il numero di build di GitHub Actions diventa il versionCode: ogni APK nuovo si installa sopra il precedente.
+def buildNumber = (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+
+android {
+    namespace 'it.trailtrack.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'it.trailtrack.app'
+        minSdk 26
+        targetSdk 35
+        versionCode buildNumber
+        versionName "1.0.${buildNumber}"
+    }
+
+    // Chiave fissa: gli aggiornamenti mantengono i dati. È una chiave per sideload personale,
+    // non usarla per pubblicare sul Play Store.
+    signingConfigs {
+        shared {
+            storeFile file('trailtrack.keystore')
+            storePassword 'trailtrack'
+            keyAlias 'trailtrack'
+            keyPassword 'trailtrack'
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.shared
+        }
+        debug {
+            signingConfig signingConfigs.shared
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+// L'interfaccia è la stessa web app di /trekking, copiata negli asset dell'APK.
+abstract class CopyWebTask extends DefaultTask {
+    @InputDirectory
+    abstract DirectoryProperty getSrc()
+
+    @OutputDirectory
+    abstract DirectoryProperty getOutputDir()
+
+    @Inject
+    abstract FileSystemOperations getFs()
+
+    @TaskAction
+    void run() {
+        fs.sync {
+            from(src) {
+                exclude 'README.md', 'sw.js', 'manifest.webmanifest'
+                into 'www'
+            }
+            into(outputDir)
+        }
+    }
+}
+
+def copyWeb = tasks.register('copyWeb', CopyWebTask) {
+    src = rootProject.layout.projectDirectory.dir('../trekking')
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets.addGeneratedSourceDirectory(copyWeb, { it.outputDir })
+    }
+}

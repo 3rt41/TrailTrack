@@ -1,0 +1,15 @@
+{
+  "name": "TrailTrack — allenamenti e trekking",
+  "short_name": "TrailTrack",
+  "description": "Traccia allenamenti e trekking con GPS, dislivelli, pausa automatica e battito dalla band.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1a14",
+  "theme_color": "#0f1a14",
+  "lang": "it",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
