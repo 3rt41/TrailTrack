@@ -60,10 +60,8 @@
     <!-- ============ STORICO ============ -->
     <section id="view-history" class="view">
       <div class="panel">
-        <div class="row-between">
-          <h2>Storico</h2>
-          <select id="historyFilter" aria-label="Filtra per tipo"></select>
-        </div>
+        <h2>Storico</h2>
+        <div id="historyFilter" class="chips" role="tablist" aria-label="Filtra per tipo"></div>
         <div id="historyTotals" class="totals"></div>
         <div id="historyList" class="history-list"></div>
         <label class="btn btn-ghost file-btn">⤒ Importa GPX
@@ -88,6 +86,7 @@
             <button id="bandDisconnect" class="btn btn-ghost hidden">Scollega</button>
           </div>
           <p class="hint" id="bandHint"></p>
+          <details class="diag"><summary>Diagnostica connessione</summary><div id="bandDiag" class="diag-log">Nessun tentativo ancora.</div></details>
         </div>
       </div>
 
@@ -99,7 +98,7 @@
           <div class="stat"><span class="lbl">FC max</span><span class="val" id="hMax">--</span></div>
           <div class="stat"><span class="lbl">Batteria band</span><span class="val" id="hBatt">--</span></div>
         </div>
-        <button id="restMeasure" class="btn btn-ghost">⏱ Misura FC a riposo e HRV (60 s)</button>
+        <button id="restMeasure" class="btn btn-ghost btn-block">⏱ Misura FC a riposo e HRV (60 s)</button>
         <p class="hint">Stai seduto/a e fermo/a per un minuto. Le misure vengono salvate nello storico salute.</p>
         <div id="healthLog" class="health-log"></div>
       </div>
@@ -158,12 +157,12 @@
       <div class="detail-meta" id="detailMeta"></div>
       <div class="map-wrap detail-map">
         <div id="detailMap" class="map"></div>
-        <select id="colorMode" class="map-select" aria-label="Colore traccia">
-          <option value="plain">Traccia</option>
-          <option value="speed">Colore: velocità</option>
-          <option value="alt">Colore: quota</option>
-          <option value="hr">Colore: battito</option>
-        </select>
+      </div>
+      <div id="colorMode" class="chips color-chips" aria-label="Colore traccia">
+        <button data-v="plain" class="active">Traccia</button>
+        <button data-v="speed">Velocità</button>
+        <button data-v="alt">Quota</button>
+        <button data-v="hr">Battito</button>
       </div>
       <div class="panel">
         <div class="stat-grid" id="detailStats"></div>

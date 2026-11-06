@@ -321,6 +321,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         hr.disconnect();
+        hr.release();
         stopService(new Intent(this, TrackingService.class));
         if (instance == this) instance = null;
         web.destroy();

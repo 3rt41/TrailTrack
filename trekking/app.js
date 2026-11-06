@@ -293,7 +293,7 @@ const BAND_NAMES = ['Mi Smart Band', 'Mi Band', 'Xiaomi Smart Band', 'Amazfit', 
 const isMiBand = (n = '') => /mi (smart )?band|xiaomi|redmi/i.test(n);
 const HR = {
   device: null, char: null, bpm: null, lastAt: 0, battery: null, rr: [], listeners: new Set(), sim: null, tries: 0,
-  nativeConnected: false, nativeName: null,
+  nativeConnected: false, nativeConnecting: false, nativeName: null, phase: '', diag: [],
   get supported() { return NATIVE || !!navigator.bluetooth; },
   get connected() { return !!this.sim || this.nativeConnected || !!this.device?.gatt?.connected; },
   get name() { return this.sim ? 'Band demo (simulata)' : this.nativeName || this.device?.name || 'Sensore'; },
@@ -360,7 +360,7 @@ const HR = {
   },
   disconnect() {
     if (this.sim) { clearInterval(this.sim); this.sim = null; }
-    if (NATIVE && this.nativeConnected) AndroidBridge.hrDisconnect();
+    if (NATIVE && (this.nativeConnected || this.nativeConnecting)) AndroidBridge.hrDisconnect();
     const d = this.device; this.device = null; this.bpm = null;
     d?.gatt?.connected && d.gatt.disconnect();
     this.emit();
@@ -383,9 +383,15 @@ const HR = {
 if (NATIVE) {
   window.__nativeHrData = (bytes) => HR.parse(new DataView(new Uint8Array(bytes).buffer));
   window.__nativeHrToast = (m) => toast(m);
+  window.__nativeHrLog = (line) => {
+    HR.diag.push(`${new Date().toLocaleTimeString('it-IT')}  ${line}`);
+    if (HR.diag.length > 80) HR.diag.shift();
+    const el = $('#bandDiag'); if (el) el.textContent = HR.diag.join('\n');
+  };
   window.__nativeHrState = (st) => {
     const was = HR.nativeConnected;
     HR.nativeConnected = st.connected; HR.nativeName = st.name;
+    HR.nativeConnecting = st.connecting; HR.phase = st.phase || '';
     if (st.battery != null) HR.battery = st.battery;
     if (!st.connected) HR.bpm = null;
     if (st.connected && !was) toast(`Collegato: ${st.name || 'band'}`);
@@ -612,6 +618,7 @@ function baseLayers() {
 }
 function makeMap(el, layerKey = 'mapLayer') {
   const map = L.map(el, { zoomControl: false, attributionControl: true }).setView([45.8, 10.5], 6);
+  map.attributionControl.setPrefix(false);
   const layers = baseLayers();
   let saved = 'Topografica'; try { saved = localStorage.getItem(layerKey) || saved; } catch { /* */ }
   (layers[saved] || layers['Topografica']).addTo(map);
@@ -787,7 +794,7 @@ const Detail = {
     $('#detail').classList.remove('hidden'); document.body.style.overflow = 'hidden';
     if (!this.map) {
       this.map = makeMap('detailMap', 'mapLayerDetail'); this.layers = L.layerGroup().addTo(this.map);
-      $('#colorMode').onchange = () => this.drawTrack();
+      chipGroup($('#colorMode'), (v) => { this.colorMode = v; this.drawTrack(); });
     }
     $('#detailName').value = act.name;
     const t = TYPES[act.type];
@@ -829,7 +836,7 @@ const Detail = {
   drawTrack(fit) {
     const a = this.act, st = this.st, pts = a.points; this.layers.clearLayers(); this.hoverMarker = null;
     if (pts.length < 2) return;
-    const mode = $('#colorMode').value;
+    const mode = this.colorMode || 'plain';
     let val = null;
     if (mode === 'speed') {
       val = pts.map((p, i) => { const j = Math.max(0, i - 5); const dt = (p.mt - pts[j].mt) / 1000; return dt > 0 && p.seg === pts[j].seg ? (st.cum[i] - st.cum[j]) / dt : null; });
@@ -903,7 +910,7 @@ const Detail = {
     try {
       await applyDem(a);
       a.stats = statsSummary(computeStats(a)); await DB.put(a);
-      this.st = computeStats(a); this.renderStats(); this.renderCharts(); if ($('#colorMode').value === 'alt') this.drawTrack();
+      this.st = computeStats(a); this.renderStats(); this.renderCharts(); if (this.colorMode === 'alt') this.drawTrack();
       toast(`Quote corrette: +${Math.round(this.st.gain)} m / −${Math.round(this.st.loss)} m`);
       History.load();
     } catch (e) { toast('Impossibile scaricare le quote: ' + e.message, 4000); }
@@ -988,7 +995,7 @@ const History = {
     this.render(); Health.renderSummary();
   },
   render() {
-    const f = $('#historyFilter').value || 'all';
+    const f = this.filter || 'all';
     const list = this.items.filter((a) => f === 'all' || a.type === f);
     const tot = list.reduce((s, a) => ({ d: s.d + a.stats.distance, g: s.g + a.stats.gain, m: s.m + a.stats.movingMs }), { d: 0, g: 0, m: 0 });
     $('#historyTotals').innerHTML = `<div><b>${list.length}</b><span>attività</span></div><div><b>${fmtKm(tot.d, 1)}</b><span>km</span></div><div><b>${Math.round(tot.g)}</b><span>m D+</span></div><div><b>${fmtDurShort(tot.m)}</b><span>in movimento</span></div>`;
@@ -1035,9 +1042,14 @@ const Health = {
     if (z >= 0) { zEl.textContent = `${ZONES[z].name} ${ZONES[z].label}`; zEl.style.background = ZONES[z].color + '33'; zEl.style.color = ZONES[z].color; }
     else zEl.textContent = '';
     if (bpm) { const h = $('#hrHeart'); h.classList.remove('beat'); void h.offsetWidth; h.classList.add('beat'); }
-    $('#bandInfo').textContent = HR.connected ? `Collegato a ${HR.name}${HR.battery != null ? ` · batteria ${HR.battery}%` : ''}` : 'Nessun dispositivo collegato';
-    $('#bandConnect').classList.toggle('hidden', HR.connected);
-    $('#bandDisconnect').classList.toggle('hidden', !HR.connected);
+    const busy = HR.nativeConnecting && !HR.connected;
+    $('#bandInfo').textContent = HR.phase
+      ? HR.phase
+      : HR.connected ? `Collegato a ${HR.name}${HR.battery != null ? ` · batteria ${HR.battery}%` : ''}` : 'Nessun dispositivo collegato';
+    $('#bandInfo').classList.toggle('busy', busy);
+    $('#bandConnect').classList.toggle('hidden', HR.connected || busy);
+    $('#bandDisconnect').classList.toggle('hidden', !HR.connected && !busy);
+    $('#bandDisconnect').textContent = busy ? 'Annulla' : 'Scollega';
     $('#hBatt').innerHTML = HR.battery != null ? `${HR.battery}<small> %</small>` : '--';
     const rm = calcRmssd(HR.rr.slice(-120));
     const last = this.log[0];
@@ -1047,7 +1059,7 @@ const Health = {
     $('#bandHint').textContent = settings.demo
       ? 'Modalità demo attiva: il battito è simulato.'
       : HR.supported
-        ? (NATIVE ? 'Tocca "Collega band" e scegli la tua band dall\'elenco (compaiono anche quelle già collegate a Zepp Life). ' : '') + 'Mi Band 6: nell\'app Zepp Life (o Mi Fitness) → Profilo → la tua band → attiva "Condivisione frequenza cardiaca". Poi, per un battito continuo, avvia un allenamento anche sulla band. Funziona anche con fasce Polar, Garmin, Wahoo, Coros e altre band Bluetooth standard.'
+        ? (NATIVE ? 'Tocca "Collega band" e scegli la tua band dall\'elenco (compaiono anche quelle già collegate a Zepp Life). ' : '') + 'Mi Band 6: nell\'app Zepp Life (o Mi Fitness) → Profilo → la tua band → attiva "Condivisione frequenza cardiaca" (e "Rilevabile", se presente). Poi, per un battito continuo, avvia un allenamento anche sulla band. Funziona anche con fasce Polar, Garmin, Wahoo, Coros e altre band Bluetooth standard.'
         : 'Il tuo browser non supporta Web Bluetooth (es. Safari su iPhone). Usa Chrome su Android/PC, oppure importa i GPX con battito dall\'app della tua band (Storico → Importa GPX).';
   },
   async measureRest() {
@@ -1125,6 +1137,14 @@ function initSettings() {
   };
 }
 
+function chipGroup(el, onPick) {
+  $$('button', el).forEach((b) => (b.onclick = () => {
+    $$('button', el).forEach((x) => x.classList.toggle('active', x === b));
+    b.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    onPick(b.dataset.v);
+  }));
+}
+
 // ───────────────────────── Integrazione Android ─────────────────────────
 function setupNative() {
   window.__nativeBack = () => {
@@ -1156,8 +1176,8 @@ async function main() {
   UI.init(); initSettings(); await Health.init();
   $$('.tabbar button').forEach((b) => (b.onclick = () => { Detail.act && Detail.close(); showView(b.dataset.view); }));
   const hf = $('#historyFilter');
-  hf.innerHTML = '<option value="all">Tutte</option>' + Object.entries(TYPES).map(([k, t]) => `<option value="${k}">${t.icon} ${t.label}</option>`).join('');
-  hf.onchange = () => History.render();
+  hf.innerHTML = '<button data-v="all" class="active">Tutte</button>' + Object.entries(TYPES).map(([k, t]) => `<button data-v="${k}">${t.icon} ${t.label}</button>`).join('');
+  chipGroup(hf, (v) => { History.filter = v; History.render(); });
   $('#gpxImport').onchange = (e) => { History.importGpx([...e.target.files]); e.target.value = ''; };
   $('#detailBack').onclick = () => Detail.close();
   $('#detailName').onchange = () => Detail.rename();
