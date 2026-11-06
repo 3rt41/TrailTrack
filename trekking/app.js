@@ -94,8 +94,13 @@ function vibrate(p) { if (settings.vibrate && navigator.vibrate) navigator.vibra
 const DB = (() => {
   let dbp;
   const open = () => dbp || (dbp = new Promise((res, rej) => {
-    const r = indexedDB.open('trailtrack', 1);
-    r.onupgradeneeded = () => { r.result.createObjectStore('activities', { keyPath: 'id' }); r.result.createObjectStore('kv'); };
+    const r = indexedDB.open('trailtrack', 2);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      if (!d.objectStoreNames.contains('activities')) d.createObjectStore('activities', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos', { keyPath: 'id' }).createIndex('actId', 'actId');
+    };
     r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
   }));
   async function tx(store, mode, fn) {
@@ -113,6 +118,11 @@ const DB = (() => {
     kvGet: (k) => tx('kv', 'readonly', (s) => s.get(k)),
     kvSet: (k, v) => tx('kv', 'readwrite', (s) => s.put(v, k)),
     kvDel: (k) => tx('kv', 'readwrite', (s) => s.delete(k)),
+    photoPut: (p) => tx('photos', 'readwrite', (s) => s.put(p)),
+    photoDel: (id) => tx('photos', 'readwrite', (s) => s.delete(id)),
+    photosOf: (actId) => tx('photos', 'readonly', (s) => s.index('actId').getAll(actId)),
+    photosAll: () => tx('photos', 'readonly', (s) => s.getAll()),
+    photosDelOf: (actId) => tx('photos', 'readwrite', (s) => { s.index('actId').openKeyCursor(IDBKeyRange.only(actId)).onsuccess = (e) => { const c = e.target.result; if (c) { s.delete(c.primaryKey); c.continue(); } }; }),
   };
 })();
 
@@ -902,13 +912,14 @@ const Detail = {
     $('#detailMeta').textContent = `${t.icon} ${t.label} · ${fmtDate(act.startTime)} · ${fmtTime(act.startTime)}–${fmtTime(act.endTime || act.startTime + act.totalMs)}${act.source === 'demo' ? ' · demo' : ''}${act.source === 'gpx' ? ' · importata' : ''}`;
     // quote dal modello del terreno: più affidabili del GPS (e presenti anche se il telefono non le dà)
     if (act.points.length > 1 && !act.demApplied && navigator.onLine !== false) this.autoDem(act);
+    Photos.load(act);
     this.render(true);
   },
-  close() { $('#detail').classList.add('hidden'); document.body.style.overflow = ''; this.act = null; },
+  close() { Photos.unload(); $('#detail').classList.add('hidden'); document.body.style.overflow = ''; this.act = null; },
   render(fit) {
     this.renderSummary();
     if (fit) this.needFit = true;
-    const go = () => { if (!this.act) return; this.map.invalidateSize(); this.drawTrack(); this.fit(); this.renderCharts(); };
+    const go = () => { if (!this.act) return; this.map.invalidateSize(); this.drawTrack(); Photos.drawMarkers(); this.fit(); this.renderCharts(); };
     requestAnimationFrame(go);
     setTimeout(go, 350); // seconda passata: in alcune WebView il layout è pronto solo dopo
   },
@@ -1144,10 +1155,217 @@ const Detail = {
   },
   async remove() {
     if (!await confirmDlg(`Eliminare "${this.act.name}"?`, 'Elimina')) return;
-    await DB.del(this.act.id); this.close(); History.load(); toast('Attività eliminata');
+    await DB.del(this.act.id); await DB.photosDelOf(this.act.id).catch(() => {});
+    this.close(); History.load(); toast('Attività eliminata');
   },
   exportGpx() { const a = this.act; download(`${a.name.replace(/[^\w\- ]+/g, '').trim() || 'attivita'}.gpx`, toGpx(a), 'application/gpx+xml'); },
 };
+// ───────────────────────── Foto dell'attività ─────────────────────────
+/* Legge da un JPEG l'ora di scatto e le coordinate GPS (EXIF), se presenti. */
+async function readExif(file) {
+  try {
+    const v = new DataView(await file.slice(0, 256 * 1024).arrayBuffer());
+    if (v.getUint16(0) !== 0xffd8) return {};
+    let o = 2;
+    while (o + 4 < v.byteLength) {
+      const m = v.getUint16(o), len = v.getUint16(o + 2);
+      if (m === 0xffe1 && v.getUint32(o + 4) === 0x45786966) return parseTiff(v, o + 10);
+      if ((m & 0xff00) !== 0xff00 || m === 0xffda) break;
+      o += 2 + len;
+    }
+  } catch { /* non è un JPEG con EXIF */ }
+  return {};
+}
+function parseTiff(v, b) {
+  const le = v.getUint16(b) === 0x4949;
+  const u16 = (o) => v.getUint16(b + o, le), u32 = (o) => v.getUint32(b + o, le);
+  const ifd = (off) => {
+    const out = {}; const n = u16(off);
+    for (let i = 0; i < n; i++) {
+      const e = off + 2 + i * 12, tag = u16(e), type = u16(e + 2), cnt = u32(e + 4);
+      const size = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1 }[type] || 1;
+      const at = size * cnt > 4 ? u32(e + 8) : e + 8;
+      if (type === 2) { let str = ''; for (let k = 0; k < cnt - 1; k++) str += String.fromCharCode(v.getUint8(b + at + k)); out[tag] = str; }
+      else if (type === 5) { out[tag] = []; for (let k = 0; k < cnt; k++) out[tag].push(u32(at + k * 8) / (u32(at + k * 8 + 4) || 1)); }
+      else if (type === 3) out[tag] = u16(at);
+      else if (type === 4) out[tag] = u32(at);
+    }
+    return out;
+  };
+  const res = {};
+  const i0 = ifd(u32(4));
+  if (i0[0x8769]) {
+    const ex = ifd(i0[0x8769]);
+    const d = (ex[0x9003] || i0[0x0132] || '').match(/^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/);
+    if (d) {
+      const off = (ex[0x9011] || '').match(/^([+-])(\d\d):(\d\d)$/);
+      res.t = off ? Date.parse(`${d[1]}-${d[2]}-${d[3]}T${d[4]}:${d[5]}:${d[6]}${off[0]}`)
+        : new Date(+d[1], d[2] - 1, +d[3], +d[4], +d[5], +d[6]).getTime(); // ora locale del telefono
+    }
+  }
+  if (i0[0x8825]) {
+    const g = ifd(i0[0x8825]);
+    const dms = (a) => a && a.length === 3 ? a[0] + a[1] / 60 + a[2] / 3600 : null;
+    const lat = dms(g[2]), lon = dms(g[4]);
+    if (lat != null && lon != null && (lat || lon)) { res.lat = g[1] === 'S' ? -lat : lat; res.lon = g[3] === 'W' ? -lon : lon; }
+  }
+  return res;
+}
+/* Ridimensiona e ricomprime in JPEG (le foto del telefono pesano troppo per IndexedDB). */
+async function shrinkImage(file, max, q) {
+  let img;
+  try { img = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch {
+    const url = URL.createObjectURL(file);
+    img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('immagine non leggibile')); i.src = url; })
+      .finally(() => URL.revokeObjectURL(url));
+  }
+  const w0 = img.width, h0 = img.height, k = Math.min(1, max / Math.max(w0, h0));
+  const c = document.createElement('canvas'); c.width = Math.round(w0 * k); c.height = Math.round(h0 * k);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  img.close?.();
+  const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', q));
+  if (!blob) throw new Error('compressione non riuscita');
+  return { blob, w: c.width, h: c.height };
+}
+/* Punto del percorso più vicino (nel tempo) all'ora di scatto. */
+function pointAtTime(act, t) {
+  const pts = act.points.filter((p) => p.t);
+  if (!t || !pts.length) return null;
+  const end = act.endTime || act.startTime + act.totalMs;
+  if (t < act.startTime - 600000 || t > end + 600000) return null;
+  let lo = 0, hi = pts.length - 1;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (pts[mid].t < t) lo = mid + 1; else hi = mid; }
+  const best = lo > 0 && Math.abs(pts[lo - 1].t - t) < Math.abs(pts[lo].t - t) ? pts[lo - 1] : pts[lo];
+  return Math.abs(best.t - t) <= 600000 ? best : null;
+}
+const blobToDataUrl = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(b); });
+const dataUrlToBlob = async (u) => (await fetch(u)).blob();
+
+const Photos = {
+  act: null, list: [], urls: new Map(), layer: null, idx: -1, busy: 0,
+  init() {
+    const onFiles = (e) => { const f = [...e.target.files]; e.target.value = ''; if (f.length) this.add(f); };
+    $('#photoCamera').onchange = onFiles; $('#photoPick').onchange = onFiles;
+    $('#lbClose').onclick = () => this.closeViewer();
+    $('#lbPrev').onclick = () => this.show(this.idx - 1);
+    $('#lbNext').onclick = () => this.show(this.idx + 1);
+    $('#lbDelete').onclick = () => this.remove();
+    $('#lbCaption').onchange = () => this.saveCaption();
+    document.addEventListener('keydown', (e) => {
+      if ($('#lightbox').classList.contains('hidden') || e.target === $('#lbCaption')) return;
+      if (e.key === 'Escape') this.closeViewer();
+      else if (e.key === 'ArrowLeft') this.show(this.idx - 1);
+      else if (e.key === 'ArrowRight') this.show(this.idx + 1);
+    });
+    let x0 = null; const stage = $('.lb-stage');
+    stage.addEventListener('touchstart', (e) => { x0 = e.touches.length === 1 ? e.touches[0].clientX : null; }, { passive: true });
+    stage.addEventListener('touchend', (e) => {
+      if (x0 == null) return; const dx = e.changedTouches[0].clientX - x0; x0 = null;
+      if (Math.abs(dx) > 50) this.show(this.idx + (dx < 0 ? 1 : -1));
+    });
+  },
+  url(p, kind) {
+    const key = p.id + kind;
+    if (!this.urls.has(key)) this.urls.set(key, URL.createObjectURL(p[kind]));
+    return this.urls.get(key);
+  },
+  freeUrls() { this.urls.forEach((u) => URL.revokeObjectURL(u)); this.urls.clear(); },
+  async load(act) {
+    this.unload(); this.act = act;
+    this.renderGrid();
+    try { this.list = (await DB.photosOf(act.id)).sort((x, y) => (x.t || x.added) - (y.t || y.added)); } catch { this.list = []; }
+    if (this.act !== act) return;
+    this.renderGrid(); this.drawMarkers();
+  },
+  unload() { this.closeViewer(); this.act = null; this.list = []; this.freeUrls(); this.layer?.clearLayers(); },
+  async add(files) {
+    const act = this.act; if (!act) return;
+    navigator.storage?.persist?.().catch(() => {});
+    this.busy += files.length; this.renderGrid();
+    let ok = 0;
+    for (const f of files) {
+      try {
+        if (f.type && !f.type.startsWith('image/')) throw new Error('non è un\'immagine');
+        const ex = await readExif(f);
+        const big = await shrinkImage(f, 1600, 0.82), th = await shrinkImage(big.blob, 360, 0.75);
+        const t = ex.t || f.lastModified || null;
+        const near = ex.lat == null ? pointAtTime(act, t) : null;
+        const p = {
+          id: uid(), actId: act.id, added: Date.now(), t, caption: '',
+          lat: ex.lat ?? near?.lat ?? null, lon: ex.lon ?? near?.lon ?? null, alt: near?.alt ?? null,
+          w: big.w, h: big.h, blob: big.blob, thumb: th.blob,
+        };
+        await DB.photoPut(p);
+        if (this.act === act) this.list.push(p);
+        ok++;
+      } catch (e) { toast(`${f.name || 'Foto'}: ${e.message}`, 4000); }
+      this.busy--;
+      if (this.act === act) this.renderGrid();
+    }
+    if (this.act !== act) return;
+    this.list.sort((x, y) => (x.t || x.added) - (y.t || y.added));
+    this.renderGrid(); this.drawMarkers();
+    if (ok) toast(ok > 1 ? `${ok} foto aggiunte` : 'Foto aggiunta');
+  },
+  renderGrid() {
+    const n = this.list.length;
+    $('#photoCount').textContent = n ? `${n} foto${this.list.some((p) => p.lat != null) ? ' · 📍 sulla mappa' : ''}` : '';
+    $('#photoGrid').innerHTML = this.list.map((p, i) => `<button data-i="${i}" aria-label="Apri foto ${i + 1}"><img src="${this.url(p, 'thumb')}" alt="${esc(p.caption || '')}" loading="lazy" />${p.lat != null ? '<span class="pin">📍</span>' : ''}</button>`).join('')
+      + Array.from({ length: Math.max(0, this.busy) }, () => '<button class="loading" disabled>⏳</button>').join('');
+    $$('#photoGrid button[data-i]').forEach((b) => (b.onclick = () => this.openViewer(+b.dataset.i)));
+  },
+  drawMarkers() {
+    const map = Detail.map; if (!map || !this.act) return;
+    if (!this.layer) this.layer = L.layerGroup().addTo(map);
+    this.layer.clearLayers();
+    this.list.forEach((p, i) => {
+      if (p.lat == null) return;
+      L.marker([p.lat, p.lon], { icon: L.divIcon({ className: 'photo-marker', html: `<img src="${this.url(p, 'thumb')}" alt="" />`, iconSize: [38, 38] }), zIndexOffset: 500 })
+        .bindTooltip(p.caption || (p.t ? `Foto delle ${fmtTime(p.t)}` : 'Foto'))
+        .on('click', () => this.openViewer(i)).addTo(this.layer);
+    });
+  },
+  openViewer(i) { $('#lightbox').classList.remove('hidden'); this.show(i); },
+  closeViewer() { if (this.idx < 0) return; this.saveCaption(); $('#lightbox').classList.add('hidden'); $('#lbImg').removeAttribute('src'); this.idx = -1; },
+  show(i) {
+    if (!this.list.length) return this.closeViewer();
+    if (this.idx >= 0 && this.idx !== i) this.saveCaption();
+    this.idx = (i + this.list.length) % this.list.length;
+    const p = this.list[this.idx], many = this.list.length > 1;
+    $('#lbImg').src = this.url(p, 'blob'); $('#lbImg').alt = p.caption || 'Foto dell\'attività';
+    $('#lbInfo').textContent = [many ? `${this.idx + 1}/${this.list.length}` : '', p.t ? `${fmtDate(p.t)} · ${fmtTime(p.t)}` : '', p.alt != null ? `${Math.round(p.alt)} m` : ''].filter(Boolean).join(' · ');
+    $('#lbCaption').value = p.caption || '';
+    $('#lbPrev').classList.toggle('hidden', !many); $('#lbNext').classList.toggle('hidden', !many);
+  },
+  async saveCaption() {
+    const p = this.list[this.idx]; if (!p) return;
+    const v = $('#lbCaption').value.trim(); if (v === (p.caption || '')) return;
+    p.caption = v; await DB.photoPut(p).catch(() => toast('Didascalia non salvata')); this.renderGrid(); this.drawMarkers();
+  },
+  async remove() {
+    const p = this.list[this.idx]; if (!p) return;
+    if (!await confirmDlg('Eliminare questa foto?', 'Elimina')) return;
+    await DB.photoDel(p.id);
+    ['blob', 'thumb'].forEach((k) => { const u = this.urls.get(p.id + k); if (u) { URL.revokeObjectURL(u); this.urls.delete(p.id + k); } });
+    this.list.splice(this.idx, 1);
+    this.renderGrid(); this.drawMarkers();
+    if (this.list.length) this.show(Math.min(this.idx, this.list.length - 1)); else this.closeViewer();
+    toast('Foto eliminata');
+  },
+  // backup: le immagini viaggiano nel JSON come data URL
+  async exportAll() {
+    const all = await DB.photosAll().catch(() => []);
+    return Promise.all(all.map(async (p) => ({ ...p, blob: await blobToDataUrl(p.blob), thumb: await blobToDataUrl(p.thumb) })));
+  },
+  async importAll(list) {
+    let n = 0;
+    for (const p of list || []) {
+      try { await DB.photoPut({ ...p, blob: await dataUrlToBlob(p.blob), thumb: await dataUrlToBlob(p.thumb) }); n++; } catch { /* foto danneggiata */ }
+    }
+    return n;
+  },
+};
+
 function zoneRows(zoneMs, tot) {
   return ZONES.map((z, i) => `<div class="zone-row"><b style="color:${z.color}">${z.name}</b><div class="zone-bar"><i style="width:${(100 * zoneMs[i] / tot).toFixed(1)}%;background:${z.color}"></i></div><span>${fmtDurShort(zoneMs[i])}</span></div>`).join('');
 }
@@ -1352,7 +1570,7 @@ function initSettings() {
   bind('#setAutoPause', 'autoPause', 'bool'); bind('#setWake', 'wake', 'bool'); bind('#setVibrate', 'vibrate', 'bool');
   bind('#setMaxAcc', 'maxAcc', 'num'); bind('#setDemo', 'demo', 'bool');
   $('#backupBtn').onclick = async () => {
-    const data = { app: 'trailtrack', version: 1, exported: new Date().toISOString(), settings, healthLog: Health.log, activities: await DB.all() };
+    const data = { app: 'trailtrack', version: 2, exported: new Date().toISOString(), settings, healthLog: Health.log, activities: await DB.all(), photos: await Photos.exportAll() };
     download(`trailtrack-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data), 'application/json');
   };
   $('#restoreInput').onchange = async (e) => {
@@ -1362,7 +1580,8 @@ function initSettings() {
       if (data.app !== 'trailtrack') throw new Error('file non riconosciuto');
       for (const a of data.activities || []) await DB.put(a);
       if (data.healthLog?.length) { Health.log = data.healthLog; await DB.kvSet('healthLog', data.healthLog); }
-      toast(`${data.activities?.length || 0} attività ripristinate`); History.load(); Health.renderLog();
+      const nPh = await Photos.importAll(data.photos);
+      toast(`${data.activities?.length || 0} attività ripristinate${nPh ? ` · ${nPh} foto` : ''}`); History.load(); Health.renderLog();
     } catch (err) { toast('Ripristino fallito: ' + err.message, 4000); }
     e.target.value = '';
   };
@@ -1380,6 +1599,7 @@ function chipGroup(el, onPick) {
 function setupNative() {
   window.__nativeBack = () => {
     if (!$('#modal').classList.contains('hidden')) return true; // scegli un'opzione del dialogo
+    if (!$('#lightbox').classList.contains('hidden')) { Photos.closeViewer(); return true; }
     if (Detail.act) { Detail.close(); return true; }
     if (!$('#view-record').classList.contains('active')) { showView('record'); return true; }
     return false;
@@ -1405,7 +1625,7 @@ function showView(v) {
 async function main() {
   try { settings = { ...DEFAULT_SETTINGS, ...((await DB.kvGet('settings')) || {}) }; } catch { /* default */ }
   if (!settings.migratedAcc) { if (settings.maxAcc === 35) settings.maxAcc = 50; settings.migratedAcc = true; saveSettings(); }
-  UI.init(); initSettings(); await Health.init();
+  UI.init(); initSettings(); Photos.init(); await Health.init();
   $$('.tabbar button').forEach((b) => (b.onclick = () => { Detail.act && Detail.close(); showView(b.dataset.view); }));
   const hf = $('#historyFilter');
   hf.innerHTML = '<button data-v="all" class="active">Tutte</button>' + Object.entries(TYPES).map(([k, t]) => `<button data-v="${k}">${t.icon} ${t.label}</button>`).join('');
@@ -1440,4 +1660,4 @@ async function main() {
 main();
 
 // esposto per debug/test
-window.TrailTrack = { Recorder, HR, DB, Detail, computeStats, fromGpx, toGpx, settings: () => settings };
+window.TrailTrack = { Recorder, HR, DB, Detail, Photos, computeStats, fromGpx, toGpx, settings: () => settings };

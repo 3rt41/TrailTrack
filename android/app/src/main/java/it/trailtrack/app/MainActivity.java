@@ -52,6 +52,7 @@ public class MainActivity extends Activity {
 
     private Runnable pendingGranted, pendingDenied;
     private ValueCallback<Uri[]> fileCallback;
+    private Uri cameraUri;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -113,9 +114,31 @@ public class MainActivity extends Activity {
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> cb, FileChooserParams params) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = cb;
+                // tipo di file richiesto dalla pagina (es. "image/*" per le foto); ".gpx" e simili → qualsiasi file
+                String type = "*/*";
+                String[] acc = params.getAcceptTypes();
+                if (acc != null && acc.length > 0 && acc[0] != null && acc[0].contains("/")) type = acc[0];
+                // <input capture>: apre direttamente la fotocamera, la foto finisce anche in Immagini/TrailTrack
+                if (params.isCaptureEnabled() && type.startsWith("image/") && Build.VERSION.SDK_INT >= 29) {
+                    try {
+                        ContentValues v = new ContentValues();
+                        v.put(MediaStore.Images.Media.DISPLAY_NAME, "TrailTrack_" + System.currentTimeMillis() + ".jpg");
+                        v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                        v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/TrailTrack");
+                        cameraUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+                        Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                        cam.putExtra(MediaStore.EXTRA_OUTPUT, cameraUri);
+                        cam.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivityForResult(cam, REQ_FILE);
+                        return true;
+                    } catch (Exception e) {
+                        if (cameraUri != null) { try { getContentResolver().delete(cameraUri, null, null); } catch (Exception ignored) { } }
+                        cameraUri = null; // nessuna app fotocamera: si ripiega sulla galleria
+                    }
+                }
                 Intent i = new Intent(Intent.ACTION_GET_CONTENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("*/*");
+                i.setType(type);
                 i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
                 try {
                     startActivityForResult(Intent.createChooser(i, "Scegli file"), REQ_FILE);
@@ -294,7 +317,11 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_FILE && fileCallback != null) {
             Uri[] res = null;
-            if (resultCode == RESULT_OK && data != null) {
+            if (cameraUri != null) {
+                if (resultCode == RESULT_OK) res = new Uri[]{cameraUri};
+                else { try { getContentResolver().delete(cameraUri, null, null); } catch (Exception ignored) { } }
+                cameraUri = null;
+            } else if (resultCode == RESULT_OK && data != null) {
                 if (data.getClipData() != null) {
                     res = new Uri[data.getClipData().getItemCount()];
                     for (int i = 0; i < res.length; i++) res[i] = data.getClipData().getItemAt(i).getUri();
