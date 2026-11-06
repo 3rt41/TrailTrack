@@ -194,6 +194,21 @@
           <div id="splitsBars" class="split-bars"></div>
         </section>
 
+        <!-- Foto -->
+        <section class="card span2" id="photosPanel">
+          <div class="card-title row-between"><h3>📷 Foto</h3><span class="hint" id="photoCount"></span></div>
+          <div id="photoGrid" class="photo-grid"></div>
+          <div class="controls">
+            <label class="btn btn-ghost file-btn">📷 Scatta
+              <input type="file" id="photoCamera" accept="image/*" capture="environment" hidden />
+            </label>
+            <label class="btn btn-ghost file-btn">🖼 Dalla galleria
+              <input type="file" id="photoPick" accept="image/*" multiple hidden />
+            </label>
+          </div>
+          <p class="hint">Le foto scattate durante l'attività compaiono anche sulla mappa, nel punto in cui le hai fatte.</p>
+        </section>
+
         <!-- Consigli -->
         <section class="card span2" id="tipsPanel">
           <h3 class="card-title">💡 Cosa ti dice questo allenamento</h3>
@@ -206,6 +221,21 @@
         <button id="deleteBtn" class="btn btn-danger-ghost">🗑 Elimina</button>
       </div>
     </div>
+  </div>
+
+  <!-- ============ VISUALIZZATORE FOTO ============ -->
+  <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Foto">
+    <div class="lb-head">
+      <button id="lbClose" class="icon-btn" aria-label="Chiudi">✕</button>
+      <span id="lbInfo" class="lb-info"></span>
+      <button id="lbDelete" class="icon-btn" aria-label="Elimina foto">🗑</button>
+    </div>
+    <div class="lb-stage">
+      <button id="lbPrev" class="lb-nav" aria-label="Foto precedente">‹</button>
+      <img id="lbImg" alt="" />
+      <button id="lbNext" class="lb-nav" aria-label="Foto successiva">›</button>
+    </div>
+    <input id="lbCaption" class="lb-caption" placeholder="Aggiungi una didascalia…" aria-label="Didascalia" maxlength="200" />
   </div>
 
   <nav class="tabbar">

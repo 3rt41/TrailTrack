@@ -14,11 +14,14 @@ Web app (PWA) installabile sul telefono, senza server: tutti i dati restano sul 
   marcatori km e soste, profilo altimetrico interattivo, parziali per km.
 - **Band / cardiofrequenzimetro** via Bluetooth (servizio Heart Rate standard): FC live, zone, FC max/media,
   HRV (RMSSD), misura FC a riposo, batteria; calorie stimate.
+- **Foto nel recap**: dal riepilogo di un'attività puoi scattare foto o sceglierle dalla galleria; vengono
+  ridimensionate e salvate sul dispositivo (anche nel backup JSON), con didascalia. Se la foto ha la posizione
+  GPS o l'ora di scatto cade durante l'attività, compare sulla mappa nel punto in cui l'hai fatta.
 - **Storico** con totali e filtri, export/import **GPX** (anche con battito), backup JSON.
 - Recupero automatico dell'attività se l'app si chiude; funziona offline (mappe già viste in cache).
 
 ## Uso
-Serve HTTPS (es. GitHub Pages: `https://<utente>.github.io/codexdemo/trekking/`).
+Serve HTTPS (es. GitHub Pages: `https://<utente>.github.io/TrailTrack/trekking/`).
 Apri il link dal telefono → menu del browser → "Aggiungi a schermata Home".
 In *Impostazioni* c'è una **modalità demo** che simula GPS e battito per provarla da PC.
 
