@@ -24,6 +24,9 @@ const DEFAULT_SETTINGS = {
   lastType: 'hike',
 };
 
+// Dentro l'APK Android: GPS, Bluetooth e file passano dal codice nativo (AndroidBridge).
+const NATIVE = !!window.AndroidBridge;
+
 // ───────────────────────── Utility ─────────────────────────
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -79,6 +82,7 @@ function dialog(text, buttons) {
 const confirmDlg = (t, ok = 'Conferma', cls = 'btn-danger') =>
   dialog(t, [{ label: 'Annulla', value: false }, { label: ok, value: true, cls }]);
 function download(name, text, mime) {
+  if (NATIVE) { AndroidBridge.saveFile(name, mime, text); return; }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([text], { type: mime }));
   a.download = name; document.body.appendChild(a); a.click();
@@ -250,6 +254,15 @@ const RealGeo = {
   },
   stop() { if (this.id != null) navigator.geolocation.clearWatch(this.id); this.id = null; },
 };
+/* App Android: posizioni dal servizio in primo piano (continua a schermo spento). */
+const NativeGeo = {
+  start(onFix, onErr) {
+    window.__nativeFix = (j) => onFix({ coords: { latitude: j.lat, longitude: j.lon, accuracy: j.acc, altitude: j.alt, speed: j.speed }, timestamp: j.t });
+    window.__nativeGeoErr = (m) => onErr(m === 'denied' ? { code: 1 } : { message: m });
+    AndroidBridge.startTracking();
+  },
+  stop() { if (NATIVE) AndroidBridge.stopTracking(); window.__nativeFix = null; },
+};
 /* Simulatore: un giro in salita con soste, rumore GPS realistico. */
 const SimGeo = {
   timer: null, lat: 46.4102, lon: 11.8440, alt: 1450, heading: 40, t: 0,
@@ -280,13 +293,15 @@ const BAND_NAMES = ['Mi Smart Band', 'Mi Band', 'Xiaomi Smart Band', 'Amazfit', 
 const isMiBand = (n = '') => /mi (smart )?band|xiaomi|redmi/i.test(n);
 const HR = {
   device: null, char: null, bpm: null, lastAt: 0, battery: null, rr: [], listeners: new Set(), sim: null, tries: 0,
-  get supported() { return !!navigator.bluetooth; },
-  get connected() { return !!this.sim || !!this.device?.gatt?.connected; },
-  get name() { return this.sim ? 'Band demo (simulata)' : this.device?.name || 'Sensore'; },
+  nativeConnected: false, nativeName: null,
+  get supported() { return NATIVE || !!navigator.bluetooth; },
+  get connected() { return !!this.sim || this.nativeConnected || !!this.device?.gatt?.connected; },
+  get name() { return this.sim ? 'Band demo (simulata)' : this.nativeName || this.device?.name || 'Sensore'; },
   on(fn) { this.listeners.add(fn); },
   emit() { this.listeners.forEach((f) => f(this)); },
   async connect() {
     if (settings.demo) { this.startSim(); return; }
+    if (NATIVE) { AndroidBridge.hrConnect(); return; }
     if (!this.supported) throw new Error('Web Bluetooth non disponibile in questo browser');
     // Molte band (es. Xiaomi Mi Band 5/6/7, Amazfit) non annunciano il servizio cardiaco
     // nella pubblicità Bluetooth: le cerchiamo anche per nome.
@@ -345,6 +360,7 @@ const HR = {
   },
   disconnect() {
     if (this.sim) { clearInterval(this.sim); this.sim = null; }
+    if (NATIVE && this.nativeConnected) AndroidBridge.hrDisconnect();
     const d = this.device; this.device = null; this.bpm = null;
     d?.gatt?.connected && d.gatt.disconnect();
     this.emit();
@@ -364,10 +380,24 @@ const HR = {
   get fresh() { return this.bpm && Date.now() - this.lastAt < 6000 ? this.bpm : null; },
 };
 
+if (NATIVE) {
+  window.__nativeHrData = (bytes) => HR.parse(new DataView(new Uint8Array(bytes).buffer));
+  window.__nativeHrToast = (m) => toast(m);
+  window.__nativeHrState = (st) => {
+    const was = HR.nativeConnected;
+    HR.nativeConnected = st.connected; HR.nativeName = st.name;
+    if (st.battery != null) HR.battery = st.battery;
+    if (!st.connected) HR.bpm = null;
+    if (st.connected && !was) toast(`Collegato: ${st.name || 'band'}`);
+    if (st.error) dialog(st.error, [{ label: 'OK', value: 1, cls: 'btn-primary' }]);
+    HR.emit();
+  };
+}
+
 // ───────────────────────── Wake Lock ─────────────────────────
 const Wake = {
   lock: null,
-  async on() { if (!settings.wake || !('wakeLock' in navigator)) return; try { this.lock = await navigator.wakeLock.request('screen'); } catch { /* ignorato */ } },
+  async on() { if (NATIVE || !settings.wake || !('wakeLock' in navigator)) return; try { this.lock = await navigator.wakeLock.request('screen'); } catch { /* ignorato */ } },
   off() { this.lock?.release?.(); this.lock = null; },
 };
 
@@ -394,7 +424,7 @@ const Recorder = {
   },
   begin() {
     this.kf = null;
-    if (this.type.gps) (settings.demo ? SimGeo : RealGeo).start((p) => this.onFix(p), (e) => this.onGeoErr(e));
+    if (this.type.gps) (settings.demo ? SimGeo : NATIVE ? NativeGeo : RealGeo).start((p) => this.onFix(p), (e) => this.onGeoErr(e));
     clearInterval(this.timer); this.timer = setInterval(() => this.tick(), 1000);
     Wake.on(); UI.recordMode(true); this.save(true); this.tick();
   },
@@ -541,7 +571,7 @@ const Recorder = {
   },
   async discard() { this.teardown(); toast('Attività scartata'); },
   teardown() {
-    RealGeo.stop(); SimGeo.stop(); clearInterval(this.timer); this.timer = null;
+    RealGeo.stop(); SimGeo.stop(); NativeGeo.stop(); clearInterval(this.timer); this.timer = null;
     this.state = null; Wake.off(); DB.kvDel('current'); UI.recordMode(false);
   },
   save(force) {
@@ -554,7 +584,13 @@ const Recorder = {
     const s = this.state; if (!s) return;
     const now = Date.now(); if (!force && now - this.lastRender < 900) return;
     this.lastRender = now;
-    UI.renderLive(s, computeStats(s.act));
+    const st = computeStats(s.act);
+    UI.renderLive(s, st);
+    if (NATIVE && now - (this.lastNotif || 0) > 5000) {
+      this.lastNotif = now;
+      const state = s.status === 'paused' ? 'In pausa · ' : s.autoPaused ? 'Sosta · ' : '';
+      AndroidBridge.updateNotification(`${state}${fmtDur(s.act.totalMs)} · ${fmtKm(st.distance)} km · +${Math.round(st.gain)} m${HR.fresh ? ` · ♥ ${HR.fresh}` : ''}`);
+    }
   },
 };
 
@@ -632,7 +668,7 @@ const UI = {
     this.selectedType = k;
     $$('#typePicker button').forEach((b) => b.classList.toggle('active', b.dataset.type === k));
     $('#startHint').textContent = TYPES[k].gps
-      ? 'Il GPS viene attivato all\'avvio. Tieni l\'app aperta: lo schermo resta acceso automaticamente.'
+      ? (NATIVE ? 'Il GPS si attiva all\'avvio. Puoi spegnere lo schermo e mettere il telefono in tasca: la registrazione continua.' : 'Il GPS viene attivato all\'avvio. Tieni l\'app aperta: lo schermo resta acceso automaticamente.')
       : 'Allenamento al chiuso: niente GPS, registra tempo, battito e calorie.';
   },
   async start() {
@@ -983,7 +1019,7 @@ const Health = {
     this.log = (await DB.kvGet('healthLog')) || [];
     HR.on(() => this.renderLive());
     $('#bandConnect').onclick = async () => {
-      try { await HR.connect(); toast(`Collegato: ${HR.name}`); }
+      try { await HR.connect(); if (!NATIVE) toast(`Collegato: ${HR.name}`); else if (!settings.demo) toast('Cerco la band…'); }
       catch (e) { HR.device = null; HR.emit(); if (e.name !== 'NotFoundError') dialog(e.message, [{ label: 'OK', value: 1, cls: 'btn-primary' }]); }
     };
     $('#bandDisconnect').onclick = () => HR.disconnect();
@@ -1011,7 +1047,7 @@ const Health = {
     $('#bandHint').textContent = settings.demo
       ? 'Modalità demo attiva: il battito è simulato.'
       : HR.supported
-        ? 'Mi Band 6: nell\'app Zepp Life (o Mi Fitness) → Profilo → la tua band → attiva "Condivisione frequenza cardiaca". Poi, per un battito continuo, avvia un allenamento anche sulla band. Funziona anche con fasce Polar, Garmin, Wahoo, Coros e altre band Bluetooth standard.'
+        ? (NATIVE ? 'Tocca "Collega band" e scegli la tua band dall\'elenco (compaiono anche quelle già collegate a Zepp Life). ' : '') + 'Mi Band 6: nell\'app Zepp Life (o Mi Fitness) → Profilo → la tua band → attiva "Condivisione frequenza cardiaca". Poi, per un battito continuo, avvia un allenamento anche sulla band. Funziona anche con fasce Polar, Garmin, Wahoo, Coros e altre band Bluetooth standard.'
         : 'Il tuo browser non supporta Web Bluetooth (es. Safari su iPhone). Usa Chrome su Android/PC, oppure importa i GPX con battito dall\'app della tua band (Storico → Importa GPX).';
   },
   async measureRest() {
@@ -1089,6 +1125,25 @@ function initSettings() {
   };
 }
 
+// ───────────────────────── Integrazione Android ─────────────────────────
+function setupNative() {
+  window.__nativeBack = () => {
+    if (!$('#modal').classList.contains('hidden')) return true; // scegli un'opzione del dialogo
+    if (Detail.act) { Detail.close(); return true; }
+    if (!$('#view-record').classList.contains('active')) { showView('record'); return true; }
+    return false;
+  };
+  $('#setWake').closest('label').classList.add('hidden');
+  // le ottimizzazioni batteria (soprattutto su Xiaomi/Huawei) possono fermare il GPS in background
+  const box = document.createElement('div');
+  box.innerHTML = `<button class="btn btn-ghost" id="battBtn" style="width:100%;margin-top:8px">🔋 Escludi dall'ottimizzazione batteria</button>
+    <p class="hint">Consigliato: evita che il telefono fermi il GPS a schermo spento. Su Xiaomi/Redmi imposta anche Risparmio batteria → "Nessuna restrizione" per TrailTrack.</p>`;
+  $('#setDemo').closest('label').before(box);
+  const upd = () => { const opt = AndroidBridge.batteryOptimized(); $('#battBtn').textContent = opt ? '🔋 Escludi dall\'ottimizzazione batteria' : '🔋 Ottimizzazione batteria disattivata ✓'; };
+  $('#battBtn').onclick = () => AndroidBridge.openBatterySettings();
+  document.addEventListener('visibilitychange', upd); upd();
+}
+
 // ───────────────────────── Navigazione & avvio ─────────────────────────
 function showView(v) {
   $$('.view').forEach((el) => el.classList.toggle('active', el.id === 'view-' + v));
@@ -1128,7 +1183,8 @@ async function main() {
     else await DB.kvDel('current');
   }
 
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (NATIVE) setupNative();
+  else if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 main();
 

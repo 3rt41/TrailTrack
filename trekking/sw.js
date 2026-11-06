@@ -1,11 +1,11 @@
 // Service worker: app utilizzabile offline + cache delle mappe già viste.
-const SHELL = 'trailtrack-shell-v1';
+const SHELL = 'trailtrack-shell-v2';
 const TILES = 'trailtrack-tiles-v1';
 const MAX_TILES = 3000;
 const ASSETS = [
   './', 'index.html', 'app.css', 'app.js', 'icon.svg', 'manifest.webmanifest',
-  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
-  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+  'vendor/leaflet/leaflet.css', 'vendor/leaflet/leaflet.js',
+  'vendor/leaflet/images/layers.png', 'vendor/leaflet/images/layers-2x.png',
 ];
 
 self.addEventListener('install', (e) => {
@@ -42,7 +42,7 @@ self.addEventListener('fetch', (e) => {
   if (url.includes('api.open-meteo.com')) return; // sempre rete
   // app: rete se disponibile (aggiornamenti), altrimenti cache
   e.respondWith(fetch(req).then((res) => {
-    if (res.ok && (url.startsWith(self.location.origin) || url.includes('unpkg.com'))) {
+    if (res.ok && (url.startsWith(self.location.origin))) {
       const copy = res.clone(); caches.open(SHELL).then((c) => c.put(req, copy));
     }
     return res;
