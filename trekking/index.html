@@ -151,42 +151,54 @@
     <div class="detail-head">
       <button id="detailBack" class="icon-btn" aria-label="Indietro">←</button>
       <input id="detailName" class="detail-name" aria-label="Nome attività" />
-      <button id="detailMenuBtn" class="icon-btn" aria-label="Azioni">⋮</button>
+      <button id="detailMenuBtn" class="icon-btn" aria-label="Esporta GPX">⤓</button>
     </div>
     <div class="detail-body">
       <div class="detail-meta" id="detailMeta"></div>
-      <div class="map-wrap detail-map">
+
+      <!-- 1. sintesi in una frase + livello di sforzo -->
+      <section class="hero" id="dHero"></section>
+
+      <!-- 2. i quattro numeri che contano -->
+      <section class="kpis" id="dKpis"></section>
+      <div class="mini-stats" id="dMini"></div>
+
+      <!-- 3. mappa colorata per quota -->
+      <div class="map-wrap detail-map" id="dMapWrap">
         <div id="detailMap" class="map"></div>
+        <div class="map-legend" id="dLegend"><span>bassa</span><i></i><span>alta</span></div>
       </div>
-      <div id="colorMode" class="chips color-chips" aria-label="Colore traccia">
-        <button data-v="plain" class="active">Traccia</button>
-        <button data-v="speed">Velocità</button>
-        <button data-v="alt">Quota</button>
-        <button data-v="hr">Battito</button>
-      </div>
-      <div class="panel">
-        <div class="stat-grid" id="detailStats"></div>
-      </div>
+
+      <!-- 4. profilo altimetrico -->
       <div class="panel" id="elevPanel">
-        <div class="row-between"><h3>Profilo altimetrico</h3><span class="hint" id="elevSrc"></span></div>
-        <div class="chart-wrap"><canvas id="elevChart"></canvas><div class="chart-tip" id="elevTip"></div></div>
+        <div class="row-between"><h3>⛰ Profilo altimetrico</h3><span class="hint" id="elevSrc"></span></div>
+        <div class="chart-wrap" id="elevWrap"><canvas id="elevChart"></canvas><div class="chart-tip" id="elevTip"></div></div>
+        <p class="hint" id="elevNote"></p>
       </div>
+
+      <!-- 5. cuore -->
       <div class="panel" id="hrPanel">
-        <h3>Frequenza cardiaca</h3>
-        <div class="chart-wrap"><canvas id="hrChart"></canvas><div class="chart-tip" id="hrTip"></div></div>
-        <div id="detailZones" class="zones"></div>
+        <div class="row-between"><h3>♥ Cuore</h3><span class="hint" id="hrSummary"></span></div>
+        <div class="effort-bar" id="dEffortBar"></div>
+        <div class="effort-legend" id="dEffortLegend"></div>
+        <div class="chart-wrap small"><canvas id="hrChart"></canvas><div class="chart-tip" id="hrTip"></div></div>
       </div>
+
+      <!-- 6. consigli -->
+      <div class="panel" id="tipsPanel">
+        <h3>💡 Cosa ti dice questa uscita</h3>
+        <ul class="tips" id="dTips"></ul>
+      </div>
+
+      <!-- 7. parziali -->
       <div class="panel" id="splitsPanel">
-        <h3>Parziali per km</h3>
-        <table class="splits"><thead><tr><th>Km</th><th>Tempo</th><th>Passo</th><th>+/− m</th><th>FC</th></tr></thead><tbody id="splitsBody"></tbody></table>
+        <h3>⏱ Chilometro per chilometro</h3>
+        <div id="splitsBars" class="split-bars"></div>
       </div>
-      <div class="panel">
-        <div class="controls wrap">
-          <button id="demBtn" class="btn btn-ghost">⛰ Correggi quote (DEM)</button>
-          <button id="gpxBtn" class="btn btn-ghost">⤓ Esporta GPX</button>
-          <button id="deleteBtn" class="btn btn-danger-ghost">🗑 Elimina</button>
-        </div>
-        <p class="hint">"Correggi quote" sostituisce l'altitudine del GPS (spesso imprecisa) con un modello digitale del terreno (Open‑Meteo / Copernicus DEM) per un dislivello più affidabile.</p>
+
+      <div class="detail-actions">
+        <button id="gpxBtn" class="btn btn-ghost">⤓ Esporta GPX</button>
+        <button id="deleteBtn" class="btn btn-danger-ghost">🗑 Elimina</button>
       </div>
     </div>
   </div>

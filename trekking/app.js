@@ -785,66 +785,174 @@ function lineChart(canvas, tip, xs, ys, { color = '#5bd18b', fill = true, unitX 
   return { draw };
 }
 
-// ───────────────────────── Dettaglio attività ─────────────────────────
+// ───────────────────────── Dettaglio attività (riepilogo "a colpo d'occhio") ─────────────────────────
+const EFFORT = [
+  { label: 'Facile', color: '#5bd18b' },
+  { label: 'Moderata', color: '#e6d14b' },
+  { label: 'Impegnativa', color: '#f29b4b' },
+  { label: 'Molto impegnativa', color: '#ef5b6b' },
+];
+/* Sforzo: dal battito medio se c'è, altrimenti da "km-sforzo" (km + 100 m di salita = 1 km). */
+function effortOf(a, st) {
+  if (st.hrAvg) {
+    const r = st.hrAvg / maxHr();
+    return r < 0.6 ? 0 : r < 0.7 ? 1 : r < 0.8 ? 2 : 3;
+  }
+  const km = st.distance / 1000;
+  const k = a.type === 'workout' ? st.movingMs / 60000 / 15
+    : km * (a.type === 'bike' ? 0.3 : a.type === 'run' ? 1.4 : 1) + st.gain / 100;
+  return k < 4 ? 0 : k < 9 ? 1 : k < 16 ? 2 : 3;
+}
+/* Tempo "da cartello" dei sentieri (metodo CAI/escursionistico): 4 km/h in piano, 400 m/h in salita, 800 m/h in discesa. */
+function trailTimeMs(st) {
+  const h = st.distance / 1000 / 4 + st.gain / 400 + st.loss / 800;
+  return h * 3600000;
+}
+const gx = (m, f) => (settings.sex === 'f' ? f : m); // accordo maschile/femminile
+const fmtHM = (ms) => {
+  const m = Math.round(ms / 60000);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`;
+};
+const fmtKmIt = (m) => (m / 1000).toLocaleString('it-IT', { maximumFractionDigits: m < 10000 ? 2 : 1 });
+function heartBands(st) {
+  const z = st.zoneMs || [0, 0, 0, 0, 0];
+  return [
+    { label: 'Facile', hint: 'riesci a parlare', ms: z[0] + z[1], color: '#5bd18b' },
+    { label: 'Medio', hint: 'fiato più corto', ms: z[2], color: '#e6d14b' },
+    { label: 'Intenso', hint: 'parli a fatica', ms: z[3] + z[4], color: '#ef5b6b' },
+  ];
+}
+
 const Detail = {
-  map: null, layers: null, act: null, st: null, hoverMarker: null, charts: [],
+  map: null, layers: null, act: null, st: null, hoverMarker: null, charts: [], demState: '',
   async open(id) {
     const act = await DB.get(id); if (!act) return;
-    this.act = act; this.st = computeStats(act);
+    this.act = act; this.st = computeStats(act); this.demState = '';
     $('#detail').classList.remove('hidden'); document.body.style.overflow = 'hidden';
-    if (!this.map) {
-      this.map = makeMap('detailMap', 'mapLayerDetail'); this.layers = L.layerGroup().addTo(this.map);
-      chipGroup($('#colorMode'), (v) => { this.colorMode = v; this.drawTrack(); });
-    }
+    $('#detail').scrollTop = 0;
+    if (!this.map) { this.map = makeMap('detailMap', 'mapLayerDetail'); this.layers = L.layerGroup().addTo(this.map); }
     $('#detailName').value = act.name;
     const t = TYPES[act.type];
     $('#detailMeta').textContent = `${t.icon} ${t.label} · ${fmtDate(act.startTime)} · ${fmtTime(act.startTime)}–${fmtTime(act.endTime || act.startTime + act.totalMs)}${act.source === 'demo' ? ' · demo' : ''}${act.source === 'gpx' ? ' · importata' : ''}`;
-    $('.detail-map').classList.toggle('hidden', act.points.length < 2);
-    this.renderStats();
-    setTimeout(() => { this.map.invalidateSize(); this.drawTrack(true); this.renderCharts(); }, 60);
+    // quote dal modello del terreno: più affidabili del GPS (e presenti anche se il telefono non le dà)
+    if (act.points.length > 1 && !act.demApplied && navigator.onLine !== false) this.autoDem(act);
+    this.render(true);
   },
   close() { $('#detail').classList.add('hidden'); document.body.style.overflow = ''; this.act = null; },
-  renderStats() {
-    const a = this.act, st = this.st, t = TYPES[a.type];
-    const cells = [
-      ['Distanza', `${fmtKm(st.distance)}<small> km</small>`],
-      ['Tempo in movimento', fmtDur(st.movingMs)],
-      ['Tempo totale', fmtDur(st.totalMs)],
-      ['In sosta', `${fmtDur(st.pausedMs)}<small> · ${st.autoPauses}×</small>`],
-      [t.speedUnit === 'speed' ? 'Velocità media' : 'Passo medio', t.speedUnit === 'none' ? '--' : speedHtml(a.type, st.avgSpeed)],
-      [t.speedUnit === 'speed' ? 'Velocità max' : 'Passo migliore', t.speedUnit === 'none' ? '--' : speedHtml(a.type, st.maxSpeed)],
-      ['Dislivello +', `<span class="up">${Math.round(st.gain)}</span><small> m</small>`],
-      ['Dislivello −', `<span class="down">${Math.round(st.loss)}</span><small> m</small>`],
-      ['Quota max', st.altMax != null ? `${Math.round(st.altMax)}<small> m</small>` : '--'],
-      ['Quota min', st.altMin != null ? `${Math.round(st.altMin)}<small> m</small>` : '--'],
-      ['FC media', st.hrAvg ? `<span class="hr">${st.hrAvg}</span><small> bpm</small>` : '--'],
-      ['FC max', st.hrMax ? `<span class="hr">${st.hrMax}</span><small> bpm</small>` : '--'],
-      ['Calorie', `${st.kcal}<small> kcal</small>`],
-      ['HRV (RMSSD)', st.rmssd ? `${st.rmssd}<small> ms</small>` : '--'],
+  render(fit) {
+    this.renderSummary();
+    setTimeout(() => { if (!this.act) return; this.map.invalidateSize(); this.drawTrack(fit); this.renderCharts(); }, 60);
+  },
+  renderSummary() {
+    const a = this.act, st = this.st, t = TYPES[a.type], gps = t.gps && a.points.length > 1;
+    const eff = EFFORT[effortOf(a, st)];
+    const gain = Math.round(st.gain), loss = Math.round(st.loss);
+
+    // 1. frase di sintesi
+    const verb = { hike: 'Hai percorso', walk: 'Hai camminato per', run: 'Hai corso per', bike: 'Hai pedalato per', workout: `Ti sei ${gx('allenato', 'allenata')} per` }[a.type];
+    let sentence = a.type === 'workout' || !gps
+      ? `${verb} <b>${fmtHM(st.movingMs)}</b>`
+      : `${verb} <b>${fmtKmIt(st.distance)} km</b> in <b>${fmtHM(st.movingMs)}</b>`;
+    if (gps && gain >= 15) sentence += `, salendo di <b>${gain} m</b> — come ${Math.max(1, Math.round(gain / 3))} piani di scale`;
+    sentence += '.';
+    const stops = a.pauses.filter((p) => p.end && p.end - p.start >= 30000);
+    const stopLine = st.pausedMs >= 60000
+      ? `Ti sei ${gx('fermato', 'fermata')} ${stops.length > 1 ? `${stops.length} volte` : 'una volta'}, ${fmtHM(st.pausedMs)} in tutto (uscita completa: ${fmtHM(st.totalMs)}).`
+      : 'Praticamente senza soste.';
+    $('#dHero').innerHTML = `
+      <div class="effort-pill" style="--c:${eff.color}">Uscita ${eff.label.toLowerCase()}</div>
+      <p class="hero-text">${sentence}</p>
+      <p class="hero-sub">${stopLine}</p>`;
+
+    // 2. numeri chiave
+    const speedTxt = t.speedUnit === 'speed' ? `${fmtSpeed(st.avgSpeed)} km/h di media` : `${fmtPace(st.avgSpeed)} min/km`;
+    const kpis = [
+      gps ? ['Distanza', `${fmtKmIt(st.distance)}<small> km</small>`, speedTxt] : ['Durata', fmtHM(st.totalMs), ''],
+      ['In movimento', fmtDur(st.movingMs), `su ${fmtDur(st.totalMs)} totali`],
+      gps ? ['Salita', `<span class="up">↑ ${gain}</span><small> m</small>`, `discesa ↓ ${loss} m`] : ['Calorie', `${st.kcal}<small> kcal</small>`, ''],
+      st.hrAvg ? ['Battito medio', `<span class="hr">♥ ${st.hrAvg}</span><small> bpm</small>`, `massimo ${st.hrMax} bpm`] : ['Calorie', `${st.kcal}<small> kcal</small>`, 'stima'],
     ];
-    $('#detailStats').innerHTML = cells.map(([l, v]) => `<div class="stat"><span class="lbl">${l}</span><span class="val">${v}</span></div>`).join('');
-    // parziali
-    $('#splitsPanel').classList.toggle('hidden', !st.splits.length);
-    $('#splitsBody').innerHTML = st.splits.map((s) => `<tr><td>${s.partial ? s.km : s.km}</td><td>${fmtDur(s.ms)}</td><td>${t.speedUnit === 'speed' ? fmtSpeed(s.dist / (s.ms / 1000)) + ' km/h' : fmtPace(s.dist / (s.ms / 1000))}</td><td>${s.dAlt == null ? '--' : (s.dAlt >= 0 ? '+' : '') + Math.round(s.dAlt)}</td><td>${s.hr || '--'}</td></tr>`).join('');
-    // zone
-    const tot = st.zoneMs.reduce((x, y) => x + y, 0);
+    $('#dKpis').innerHTML = kpis.map(([l, v, s]) => `<div class="kpi"><span class="lbl">${l}</span><span class="val">${v}</span>${s ? `<span class="sub">${s}</span>` : ''}</div>`).join('');
+    const mini = [];
+    if (st.hrAvg || !gps) mini.push(`🔥 ${st.kcal} kcal <small>≈ ${Math.max(1, Math.round(st.kcal / 230))} cornett${Math.round(st.kcal / 230) > 1 ? 'i' : 'o'}</small>`);
+    else mini.push(`🥐 ≈ ${Math.max(1, Math.round(st.kcal / 230))} cornett${Math.round(st.kcal / 230) > 1 ? 'i' : 'o'} <small>bruciati</small>`);
+    if (gps && st.altMax != null) mini.push(`⛰ ${Math.round(st.altMax)} m <small>quota max</small>`);
+    if (gps && t.speedUnit === 'pace') mini.push(`🚀 ${fmtSpeed(st.avgSpeed)} km/h <small>media</small>`);
+    $('#dMini').innerHTML = mini.map((m) => `<span>${m}</span>`).join('');
+
+    // 3-4. mappa e profilo
+    $('#dMapWrap').classList.toggle('hidden', !gps);
+    $('#elevPanel').classList.toggle('hidden', !gps);
+
+    // 5. cuore
     $('#hrPanel').classList.toggle('hidden', !a.hr?.length);
-    $('#detailZones').innerHTML = tot ? zoneRows(st.zoneMs, tot) : '';
-    $('#elevSrc').textContent = a.demApplied ? 'quote da DEM' : (st.altMax != null ? 'quote GPS' : '');
-    $('#demBtn').disabled = a.points.length < 2;
+    if (a.hr?.length) {
+      const bands = heartBands(st), tot = bands.reduce((s, b) => s + b.ms, 0) || 1;
+      $('#hrSummary').textContent = `media ${st.hrAvg} · max ${st.hrMax} bpm`;
+      $('#dEffortBar').innerHTML = bands.map((b) => `<i style="width:${(100 * b.ms / tot).toFixed(1)}%;background:${b.color}"></i>`).join('');
+      $('#dEffortLegend').innerHTML = bands.map((b) => `<span><b style="color:${b.color}">●</b> ${b.label} <small>(${b.hint})</small> <em>${fmtHM(b.ms)}</em></span>`).join('');
+    }
+
+    // 6. consigli
+    $('#dTips').innerHTML = this.tips(a, st, effortOf(a, st)).map((x) => `<li><span>${x[0]}</span><p>${x[1]}</p></li>`).join('');
+
+    // 7. km per km
+    const sp = st.splits.filter((s) => s.ms > 0);
+    $('#splitsPanel').classList.toggle('hidden', !gps || sp.length < 2);
+    if (sp.length) {
+      const speeds = sp.map((s) => s.dist / (s.ms / 1000)), vmax = Math.max(...speeds);
+      const best = speeds.indexOf(vmax);
+      $('#splitsBars').innerHTML = sp.map((s, i) => {
+        const v = speeds[i];
+        const lab = t.speedUnit === 'speed' ? `${fmtSpeed(v)} km/h` : `${fmtPace(v)} /km`;
+        return `<div class="split-row"><span class="k">${s.partial ? fmtKmIt(s.km * 1000) : s.km}</span>
+          <div class="sbar"><i style="width:${(100 * v / vmax).toFixed(0)}%" class="${i === best ? 'best' : ''}"></i><b>${lab}</b></div>
+          <span class="d ${s.dAlt > 0 ? 'up' : 'down'}">${s.dAlt == null ? '' : (s.dAlt >= 0 ? '↑' : '↓') + Math.abs(Math.round(s.dAlt))}</span></div>`;
+      }).join('') + '<p class="hint">Barra più lunga = chilometro più veloce. A destra la salita/discesa di quel km.</p>';
+    }
+  },
+  /* Consigli pratici per chi inizia. */
+  tips(a, st, e) {
+    const out = [], t = TYPES[a.type], h = st.movingMs / 3600000, gps = t.gps && a.points.length > 1;
+    if (gps && (a.type === 'hike' || a.type === 'walk') && st.distance > 800) {
+      const std = trailTimeMs(st), r = st.movingMs / std;
+      const cmp = r < 0.85 ? `<b>più veloce</b> del tempo da cartello (${fmtHM(std)}): ottimo passo!`
+        : r > 1.25 ? `più lento del tempo da cartello (${fmtHM(std)}): normale all'inizio, con la costanza migliora.`
+          : `in linea con il tempo da cartello (${fmtHM(std)}): passo regolare.`;
+      out.push(['🧭', `Sei ${gx('andato', 'andata')} ${cmp} Per le prossime gite: moltiplica i tempi dei cartelli per <b>${r.toFixed(1).replace('.', ',')}</b>.`]);
+    }
+    if (a.hr?.length) {
+      const b = heartBands(st), tot = b.reduce((s, x) => s + x.ms, 0) || 1;
+      const hi = b[2].ms / tot, easy = b[0].ms / tot;
+      out.push(['❤️', hi >= 0.3
+        ? `Sei ${gx('stato', 'stata')} a intensità alta per il <b>${Math.round(hi * 100)}%</b> del tempo. Per allenare la resistenza, fai la maggior parte delle uscite a un ritmo in cui riesci a parlare.`
+        : easy >= 0.7
+          ? `Hai tenuto un ritmo <b>facile</b> per quasi tutta l'uscita: è il modo migliore per costruire resistenza.`
+          : `Sforzo ben distribuito: buona parte a ritmo medio, poco tempo al limite.`]);
+    } else {
+      out.push(['❤️', 'Collega la Mi Band (scheda Salute) per sapere quanto ti sei sforzato davvero.']);
+    }
+    const water = Math.max(0.3, Math.round((0.5 * h + st.gain / 1500) * 10) / 10);
+    out.push(['💧', `Per un'uscita così porta almeno <b>${water.toLocaleString('it-IT')} L d'acqua</b>, di più se fa caldo.`]);
+    if (gps && st.loss > 300) out.push(['🦵', `<b>${Math.round(st.loss)} m di discesa</b>: è la parte che affatica di più le ginocchia. I bastoncini aiutano molto.`]);
+    out.push(['😴', [
+      'Uscita leggera: puoi rifarla anche domani.',
+      'Sforzo moderato: domani va bene un\'attività tranquilla.',
+      'Uscita impegnativa: domani riposo o attività leggera. Nelle prossime 2 ore mangia carboidrati e proteine.',
+      'Sforzo molto alto: riposa 1–2 giorni, bevi molto e dormi bene.',
+    ][e]]);
+    return out;
   },
   drawTrack(fit) {
     const a = this.act, st = this.st, pts = a.points; this.layers.clearLayers(); this.hoverMarker = null;
     if (pts.length < 2) return;
-    const mode = this.colorMode || 'plain';
-    let val = null;
-    if (mode === 'speed') {
-      val = pts.map((p, i) => { const j = Math.max(0, i - 5); const dt = (p.mt - pts[j].mt) / 1000; return dt > 0 && p.seg === pts[j].seg ? (st.cum[i] - st.cum[j]) / dt : null; });
-    } else if (mode === 'alt') val = st.alts;
-    else if (mode === 'hr') val = pts.map((p) => p.hr ?? null);
-    if (val && val.filter((v) => v != null).length > 2) {
+    const val = st.alts, ok = val.filter((v) => v != null).length > 2;
+    $('#dLegend').classList.toggle('hidden', !ok);
+    if (ok) {
       const sorted = val.filter((v) => v != null).sort((x, y) => x - y);
-      const lo = sorted[Math.floor(sorted.length * 0.05)], hi = sorted[Math.floor(sorted.length * 0.95)];
+      const lo = sorted[Math.floor(sorted.length * 0.02)], hi = sorted[Math.floor(sorted.length * 0.98)];
+      $('#dLegend').innerHTML = `<span>${Math.round(lo)} m</span><i></i><span>${Math.round(hi)} m</span>`;
+      L.polyline(pts.map((p) => [p.lat, p.lon]), { color: '#0b1a10', weight: 9, opacity: 0.45, interactive: false }).addTo(this.layers);
       for (let i = 1; i < pts.length; i++) {
         if (pts[i].seg !== pts[i - 1].seg) continue;
         const v = val[i] ?? val[i - 1]; const c = v == null ? '#888' : rampColor((v - lo) / ((hi - lo) || 1));
@@ -857,8 +965,6 @@ const Detail = {
       L.polyline(segs, { color: '#0b1a10', weight: 8, opacity: 0.5, interactive: false }).addTo(this.layers);
       L.polyline(segs, { color: '#5bd18b', weight: 5, interactive: false }).addTo(this.layers);
     }
-    const dot = (p, color, label) => L.circleMarker([p.lat, p.lon], { radius: 8, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1 }).bindTooltip(label).addTo(this.layers);
-    // marcatori km
     let k = 1;
     for (let i = 1; i < pts.length; i++) {
       if (st.cum[i] >= k * 1000) {
@@ -866,11 +972,11 @@ const Detail = {
         k++;
       }
     }
-    // soste
     a.pauses.filter((p) => p.auto && p.lat != null).forEach((p) => {
       L.marker([p.lat, p.lon], { icon: L.divIcon({ className: 'pause-marker', html: 'Ⅱ', iconSize: [18, 18] }) })
         .bindTooltip(`Sosta ${fmtTime(p.start)} · ${fmtDurShort((p.end || p.start) - p.start)}`).addTo(this.layers);
     });
+    const dot = (p, color, label) => L.circleMarker([p.lat, p.lon], { radius: 8, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1 }).bindTooltip(label).addTo(this.layers);
     dot(pts[0], '#5bd18b', 'Partenza'); dot(pts[pts.length - 1], '#ef6b5b', 'Arrivo');
     if (fit) this.map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])), { padding: [24, 24] });
   },
@@ -882,18 +988,37 @@ const Detail = {
   },
   renderCharts() {
     const a = this.act, st = this.st;
-    const hasAlt = st.alts.some((v) => v != null) && a.points.length > 1;
-    $('#elevPanel').classList.toggle('hidden', !hasAlt);
     this.charts = [];
-    if (hasAlt) this.charts.push(lineChart($('#elevChart'), $('#elevTip'), Array.from(st.cum), st.alts, { color: '#f29b4b', onHover: (i) => this.hover(i) }));
+    const hasAlt = st.alts.filter((v) => v != null).length > 1 && a.points.length > 1;
+    $('#elevWrap').classList.toggle('hidden', !hasAlt);
+    $('#elevSrc').textContent = hasAlt ? (a.demApplied ? 'quote del terreno' : 'quote GPS') : '';
+    if (hasAlt) {
+      this.charts.push(lineChart($('#elevChart'), $('#elevTip'), Array.from(st.cum), st.alts, { color: '#f29b4b', onHover: (i) => this.hover(i) }));
+      $('#elevNote').innerHTML = `Da <b>${Math.round(st.alts.find((v) => v != null))} m</b> a <b>${Math.round(st.altLast)} m</b> · punto più alto <b>${Math.round(st.altMax)} m</b>. Scorri il grafico: il punto si muove sulla mappa.`
+        + (this.demState === 'loading' ? ' <i>Sto scaricando le quote del terreno per un profilo più preciso…</i>' : '');
+    } else {
+      $('#elevNote').innerHTML = this.demState === 'loading'
+        ? '⏳ Il telefono non ha registrato la quota: la sto scaricando dal modello del terreno…'
+        : 'Quota non disponibile: serve una connessione internet per scaricarla. Riapri l\'attività quando sei online.';
+    }
     if (a.hr?.length) {
-      // FC sulla distanza se c'è il GPS, altrimenti sul tempo
       if (a.points.length > 1 && a.points.some((p) => p.hr)) {
         this.charts.push(lineChart($('#hrChart'), $('#hrTip'), Array.from(st.cum), a.points.map((p) => p.hr ?? null), { color: '#ff5f7e', fill: false, unitY: 'bpm', onHover: (i) => this.hover(i) }));
       } else {
         const t0 = a.hr[0].t;
         this.charts.push(lineChart($('#hrChart'), $('#hrTip'), a.hr.map((h) => h.t - t0), a.hr.map((h) => h.bpm), { color: '#ff5f7e', fill: false, unitY: 'bpm', unitX: 'min', fmtX: (x) => Math.round(x / 60000) }));
       }
+    }
+  },
+  async autoDem(act) {
+    this.demState = 'loading';
+    try {
+      await applyDem(act);
+      act.stats = statsSummary(computeStats(act)); await DB.put(act);
+      History.load();
+      if (this.act === act) { this.demState = ''; this.st = computeStats(act); this.render(false); }
+    } catch {
+      if (this.act === act) { this.demState = 'failed'; this.renderCharts(); }
     }
   },
   async rename() {
@@ -905,17 +1030,6 @@ const Detail = {
     await DB.del(this.act.id); this.close(); History.load(); toast('Attività eliminata');
   },
   exportGpx() { const a = this.act; download(`${a.name.replace(/[^\w\- ]+/g, '').trim() || 'attivita'}.gpx`, toGpx(a), 'application/gpx+xml'); },
-  async dem() {
-    const a = this.act, btn = $('#demBtn'); btn.disabled = true; btn.textContent = '⛰ Scarico quote…';
-    try {
-      await applyDem(a);
-      a.stats = statsSummary(computeStats(a)); await DB.put(a);
-      this.st = computeStats(a); this.renderStats(); this.renderCharts(); if (this.colorMode === 'alt') this.drawTrack();
-      toast(`Quote corrette: +${Math.round(this.st.gain)} m / −${Math.round(this.st.loss)} m`);
-      History.load();
-    } catch (e) { toast('Impossibile scaricare le quote: ' + e.message, 4000); }
-    btn.disabled = false; btn.textContent = '⛰ Correggi quote (DEM)';
-  },
 };
 function zoneRows(zoneMs, tot) {
   return ZONES.map((z, i) => `<div class="zone-row"><b style="color:${z.color}">${z.name}</b><div class="zone-bar"><i style="width:${(100 * zoneMs[i] / tot).toFixed(1)}%;background:${z.color}"></i></div><span>${fmtDurShort(zoneMs[i])}</span></div>`).join('');
@@ -1181,10 +1295,9 @@ async function main() {
   $('#gpxImport').onchange = (e) => { History.importGpx([...e.target.files]); e.target.value = ''; };
   $('#detailBack').onclick = () => Detail.close();
   $('#detailName').onchange = () => Detail.rename();
-  $('#detailMenuBtn').onclick = () => $('#gpxBtn').scrollIntoView({ behavior: 'smooth' });
+  $('#detailMenuBtn').onclick = () => Detail.exportGpx();
   $('#gpxBtn').onclick = () => Detail.exportGpx();
   $('#deleteBtn').onclick = () => Detail.remove();
-  $('#demBtn').onclick = () => Detail.dem();
   window.addEventListener('resize', () => Detail.act && Detail.charts.forEach((c) => c.draw()));
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && Recorder.state) { Wake.on(); Recorder.tick(); }
@@ -1209,4 +1322,4 @@ async function main() {
 main();
 
 // esposto per debug/test
-window.TrailTrack = { Recorder, HR, DB, computeStats, fromGpx, toGpx, settings: () => settings };
+window.TrailTrack = { Recorder, HR, DB, Detail, computeStats, fromGpx, toGpx, settings: () => settings };
