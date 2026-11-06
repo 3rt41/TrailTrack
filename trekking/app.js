@@ -20,7 +20,7 @@ const ZONES = [
 ];
 const DEFAULT_SETTINGS = {
   weight: 70, age: 35, sex: 'm', maxHr: null,
-  autoPause: true, wake: true, vibrate: true, maxAcc: 35, demo: false,
+  autoPause: true, wake: true, vibrate: true, maxAcc: 50, demo: false,
   lastType: 'hike',
 };
 
@@ -446,7 +446,12 @@ const Recorder = {
     const s = this.state; if (!s) return;
     const c = pos.coords, now = Date.now();
     s.lastFixAt = now; UI.gps(c.accuracy); UI.liveMe(c.latitude, c.longitude, c.accuracy);
+    const g = (s.act.gps ||= { fixes: 0, good: 0, best: null });
+    g.fixes++; g.best = g.best == null ? Math.round(c.accuracy) : Math.min(g.best, Math.round(c.accuracy));
+    s.act.lastPos = { lat: +c.latitude.toFixed(6), lon: +c.longitude.toFixed(6), acc: Math.round(c.accuracy) };
+    s.lastAcc = c.accuracy;
     if (s.status !== 'recording' || c.accuracy > settings.maxAcc) return;
+    g.good++; s.lastGoodAt = now;
     let fix = { t: now, lat: +c.latitude.toFixed(6), lon: +c.longitude.toFixed(6), alt: c.altitude == null ? null : +c.altitude.toFixed(1), acc: Math.round(c.accuracy), spd: c.speed };
 
     // buffer delle ultime posizioni per il rilevamento della sosta
@@ -465,9 +470,9 @@ const Recorder = {
 
     if (s.autoPaused) {
       // ripartenza: due posizioni consecutive fuori dal cerchio di sosta, o velocità chiara
-      const r = Math.max(12, fix.acc * 1.2);
+      const r = Math.max(10, fix.acc * 0.8);
       const away = s.pauseCenter && haversine(s.pauseCenter, raw) > r;
-      const fast = fix.spd != null && fix.spd > 1.0 && fix.acc <= 15;
+      const fast = fix.spd != null && fix.spd > 0.6;
       s.resumeHits = away || fast ? s.resumeHits + 1 : 0;
       if (s.resumeHits >= 2) {
         // la ripartenza è avvenuta qualche secondo prima di quando la confermiamo: la retrodatiamo
@@ -489,11 +494,18 @@ const Recorder = {
     const pts = s.buf.filter((p) => p.t >= now - win);
     if (!pts.length || pts[0].t > now - win + 3000) return false; // finestra non ancora coperta
     if (pts.length < 3) return false;
-    const c = { lat: pts.reduce((a, p) => a + p.lat, 0) / pts.length, lon: pts.reduce((a, p) => a + p.lon, 0) / pts.length };
-    const acc = pts.map((p) => p.acc).sort((a, b) => a - b)[pts.length >> 1];
-    const r = Math.max(8, acc * 1.1);
-    if (pts.every((p) => haversine(c, p) <= r)) { s.pauseCenter = c; return true; }
-    return false;
+    const median = (arr) => { const v = [...arr].sort((a, b) => a - b); return v[v.length >> 1]; };
+    const avg = (arr) => ({ lat: arr.reduce((a, p) => a + p.lat, 0) / arr.length, lon: arr.reduce((a, p) => a + p.lon, 0) / arr.length });
+    // 1) velocità misurata dal GPS (effetto Doppler): affidabile anche quando la posizione è imprecisa
+    const spds = pts.map((p) => p.spd).filter((v) => v != null && Number.isFinite(v));
+    if (spds.length >= pts.length * 0.6 && median(spds) > 0.35) return false;
+    // 2) spostamento netto tra la posizione media di inizio e di fine finestra (la media annulla il "tremolio")
+    const third = Math.max(1, Math.floor(pts.length / 3));
+    const disp = haversine(avg(pts.slice(0, third)), avg(pts.slice(-third)));
+    const acc = median(pts.map((p) => p.acc));
+    if (disp >= Math.max(5, acc * 0.3)) return false;
+    s.pauseCenter = avg(pts);
+    return true;
   },
   addPoint(fix) {
     const s = this.state, act = s.act;
@@ -621,7 +633,15 @@ function makeMap(el, layerKey = 'mapLayer') {
   map.attributionControl.setPrefix(false);
   const layers = baseLayers();
   let saved = 'Topografica'; try { saved = localStorage.getItem(layerKey) || saved; } catch { /* */ }
-  (layers[saved] || layers['Topografica']).addTo(map);
+  const first = layers[saved] || layers['Topografica'];
+  first.addTo(map);
+  let loaded = 0, failed = 0;
+  first.on('tileload', () => loaded++);
+  first.on('tileerror', () => {
+    if (++failed === 6 && loaded === 0 && map.hasLayer(first) && first !== layers['Stradale']) {
+      map.removeLayer(first); layers['Stradale'].addTo(map);
+    }
+  });
   L.control.layers(layers, null, { position: 'topright' }).addTo(map);
   map.on('baselayerchange', (e) => { try { localStorage.setItem(layerKey, e.name); } catch { /* */ } });
   L.control.zoom({ position: 'topleft' }).addTo(map);
@@ -734,6 +754,11 @@ const UI = {
     const pill = $('#statusPill'), pb = $('#pauseBtn');
     if (s.status === 'paused') { pill.className = 'status-pill manual'; pill.textContent = '❚❚ In pausa'; pb.textContent = '▶ Riprendi'; pb.className = 'btn btn-primary'; }
     else if (s.autoPaused) { pill.className = 'status-pill auto'; pill.textContent = '⏸ Sosta rilevata'; pb.textContent = '❚❚ Pausa'; pb.className = 'btn btn-warn'; }
+    else if (t.gps && Date.now() - (s.lastGoodAt || act.startTime) > 20000) {
+      pill.className = 'status-pill auto';
+      pill.textContent = s.lastAcc ? `📡 GPS debole (±${Math.round(s.lastAcc)} m): vai all'aperto` : '📡 In attesa del GPS…';
+      pb.textContent = '❚❚ Pausa'; pb.className = 'btn btn-warn';
+    }
     else { pill.className = 'status-pill'; pill.textContent = `● ${t.icon} In registrazione`; pb.textContent = '❚❚ Pausa'; pb.className = 'btn btn-warn'; }
   },
 };
@@ -855,7 +880,23 @@ const Detail = {
     this.act = act; this.st = computeStats(act); this.demState = '';
     $('#detail').classList.remove('hidden'); document.body.style.overflow = 'hidden';
     $('#detail').scrollTop = 0;
-    if (!this.map) { this.map = makeMap('detailMap', 'mapLayerDetail'); this.layers = L.layerGroup().addTo(this.map); }
+    if (!this.map) {
+      this.map = makeMap('detailMap', 'mapLayerDetail'); this.layers = L.layerGroup().addTo(this.map);
+      // quando il riquadro cambia dimensione (apertura, rotazione, caricamento) ridisegna mappa e grafici
+      if ('ResizeObserver' in window) {
+        let raf = 0;
+        const ro = new ResizeObserver(() => {
+          cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(() => {
+            if (!this.act) return;
+            this.map.invalidateSize();
+            if (this.needFit) this.fit();
+            this.charts.forEach((c) => c.draw());
+          });
+        });
+        ro.observe($('#detailMap')); ro.observe($('#elevWrap')); ro.observe($('#hrWrap'));
+      }
+    }
     $('#detailName').value = act.name;
     const t = TYPES[act.type];
     $('#detailMeta').textContent = `${t.icon} ${t.label} · ${fmtDate(act.startTime)} · ${fmtTime(act.startTime)}–${fmtTime(act.endTime || act.startTime + act.totalMs)}${act.source === 'demo' ? ' · demo' : ''}${act.source === 'gpx' ? ' · importata' : ''}`;
@@ -866,11 +907,29 @@ const Detail = {
   close() { $('#detail').classList.add('hidden'); document.body.style.overflow = ''; this.act = null; },
   render(fit) {
     this.renderSummary();
-    setTimeout(() => { if (!this.act) return; this.map.invalidateSize(); this.drawTrack(fit); this.renderCharts(); }, 60);
+    if (fit) this.needFit = true;
+    const go = () => { if (!this.act) return; this.map.invalidateSize(); this.drawTrack(); this.fit(); this.renderCharts(); };
+    requestAnimationFrame(go);
+    setTimeout(go, 350); // seconda passata: in alcune WebView il layout è pronto solo dopo
+  },
+  fit() {
+    const a = this.act; if (!a || !this.needFit) return;
+    const el = $('#detailMap'); if (!el.clientWidth || !el.clientHeight) return;
+    if (a.points.length > 1) this.map.fitBounds(L.latLngBounds(a.points.map((p) => [p.lat, p.lon])), { padding: [24, 24] });
+    else if (a.points.length === 1) this.map.setView([a.points[0].lat, a.points[0].lon], 16);
+    else if (a.lastPos) this.map.setView([a.lastPos.lat, a.lastPos.lon], 15);
+    this.needFit = false;
   },
   renderSummary() {
     const a = this.act, st = this.st, t = TYPES[a.type], gps = t.gps && a.points.length > 1;
     const effIdx = effortOf(a, st), eff = EFFORT[effIdx];
+    // perché manca il percorso (se manca)
+    const g = a.gps;
+    const noTrack = !t.gps ? '' : a.points.length > 1 ? ''
+      : !g || !g.fixes ? 'Nessuna posizione ricevuta dal GPS durante l\'attività. Controlla che la localizzazione del telefono sia attiva e che TrailTrack abbia il permesso "Posizione precisa".'
+        : `Il GPS ha dato ${g.fixes} posizioni, ma troppo imprecise (la migliore ±${g.best} m, il limite è ${settings.maxAcc} m). Succede al chiuso o vicino a palazzi alti: registra all'aperto, dopo che il badge in alto mostra "GPS ±10 m" circa.`;
+    $('#dNoTrack').classList.toggle('hidden', !noTrack);
+    $('#dNoTrack').textContent = noTrack;
     const gain = Math.round(st.gain), loss = Math.round(st.loss);
     const cell = (label, value, sub = '', cls = '') => `<div class="cell ${cls}"><span class="lbl">${label}</span><span class="val">${value}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</div>`;
     const u = (x) => `<small>${x}</small>`;
@@ -893,8 +952,7 @@ const Detail = {
       <div class="headline">${head.map(([l, v]) => `<div><span class="lbl">${l}</span><span class="val">${v}</span></div>`).join('')}</div>`;
 
     // ── Percorso
-    $('#cRoute').classList.toggle('no-map', !gps);
-    $('#dMapWrap').classList.toggle('hidden', !gps);
+    $('#cRoute').classList.toggle('hidden', !t.gps);
     const stops = a.pauses.filter((p) => p.end && p.end - p.start >= 30000);
     const route = [];
     if (gps) {
@@ -908,7 +966,8 @@ const Detail = {
     $('#gRoute').innerHTML = route.join('');
 
     // ── Dislivello
-    $('#elevPanel').classList.toggle('hidden', !gps);
+    $('#elevPanel').classList.toggle('hidden', !t.gps);
+    $('#gElev').classList.toggle('hidden', !gps);
     if (gps) {
       const c = climbStats(a, st);
       $('#gElev').innerHTML = [
@@ -997,7 +1056,12 @@ const Detail = {
   },
   drawTrack(fit) {
     const a = this.act, st = this.st, pts = a.points; this.layers.clearLayers(); this.hoverMarker = null;
-    if (pts.length < 2) return;
+    if (pts.length < 2) {
+      $('#dLegend').classList.add('hidden');
+      const p = pts[0] || a.lastPos;
+      if (p) L.circleMarker([p.lat, p.lon], { radius: 8, color: '#fff', weight: 2, fillColor: '#3fa9ff', fillOpacity: 1 }).bindTooltip('Ultima posizione nota').addTo(this.layers);
+      return;
+    }
     const val = st.alts, ok = val.filter((v) => v != null).length > 2;
     $('#dLegend').classList.toggle('hidden', !ok);
     if (ok) {
@@ -1030,7 +1094,6 @@ const Detail = {
     });
     const dot = (p, color, label) => L.circleMarker([p.lat, p.lon], { radius: 8, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1 }).bindTooltip(label).addTo(this.layers);
     dot(pts[0], '#5bd18b', 'Partenza'); dot(pts[pts.length - 1], '#ef6b5b', 'Arrivo');
-    if (fit) this.map.fitBounds(L.latLngBounds(pts.map((p) => [p.lat, p.lon])), { padding: [24, 24] });
   },
   hover(i) {
     const p = this.act?.points[i];
@@ -1048,6 +1111,8 @@ const Detail = {
       this.charts.push(lineChart($('#elevChart'), $('#elevTip'), Array.from(st.cum), st.alts, { color: '#f29b4b', onHover: (i) => this.hover(i) }));
       $('#elevNote').innerHTML = 'Scorri il grafico col dito: il punto si muove sulla mappa.'
         + (this.demState === 'loading' ? ' <i>Sto scaricando le quote del terreno per un profilo più preciso…</i>' : '');
+    } else if (a.points.length < 2) {
+      $('#elevNote').innerHTML = 'Il grafico del dislivello appare quando c\'è un percorso GPS registrato.';
     } else {
       $('#elevNote').innerHTML = this.demState === 'loading'
         ? '⏳ Il telefono non ha registrato la quota: la sto scaricando dal modello del terreno…'
@@ -1339,6 +1404,7 @@ function showView(v) {
 
 async function main() {
   try { settings = { ...DEFAULT_SETTINGS, ...((await DB.kvGet('settings')) || {}) }; } catch { /* default */ }
+  if (!settings.migratedAcc) { if (settings.maxAcc === 35) settings.maxAcc = 50; settings.migratedAcc = true; saveSettings(); }
   UI.init(); initSettings(); await Health.init();
   $$('.tabbar button').forEach((b) => (b.onclick = () => { Detail.act && Detail.close(); showView(b.dataset.view); }));
   const hf = $('#historyFilter');

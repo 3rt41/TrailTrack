@@ -383,3 +383,4 @@ select, input[type=number], input[type=text] {
 .cell .sub { white-space: normal; line-height: 1.25; overflow: visible; }
 .cell .lbl { font-size: .62rem; }
 .cell.txt .val { font-size: .95rem; white-space: normal; line-height: 1.35; }
+.notrack { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: rgba(242,184,75,.12); border: 1px solid rgba(242,184,75,.45); color: #f6d58f; font-size: .88rem; line-height: 1.4; }
