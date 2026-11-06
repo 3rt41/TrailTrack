@@ -21,7 +21,7 @@ Web app (PWA) installabile sul telefono, senza server: tutti i dati restano sul 
 - Recupero automatico dell'attività se l'app si chiude; funziona offline (mappe già viste in cache).
 
 ## Uso
-Serve HTTPS (es. GitHub Pages: `https://<utente>.github.io/codexdemo/trekking/`).
+Serve HTTPS (es. GitHub Pages: `https://<utente>.github.io/TrailTrack/trekking/`).
 Apri il link dal telefono → menu del browser → "Aggiungi a schermata Home".
 In *Impostazioni* c'è una **modalità demo** che simula GPS e battito per provarla da PC.
 
