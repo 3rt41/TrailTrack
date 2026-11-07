@@ -34,6 +34,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+const avgPos = (arr) => ({ lat: arr.reduce((a, p) => a + p.lat, 0) / arr.length, lon: arr.reduce((a, p) => a + p.lon, 0) / arr.length });
 function haversine(a, b) {
   const R = 6371008.8, rad = Math.PI / 180;
   const dLat = (b.lat - a.lat) * rad, dLon = (b.lon - a.lon) * rad;
@@ -266,12 +267,14 @@ const RealGeo = {
 };
 /* App Android: posizioni dal servizio in primo piano (continua a schermo spento). */
 const NativeGeo = {
-  start(onFix, onErr) {
+  // fresh = nuova attività (il servizio azzera il diario); altrimenti si riaggancia a quella in corso
+  start(onFix, onErr, fresh) {
     window.__nativeFix = (j) => onFix({ coords: { latitude: j.lat, longitude: j.lon, accuracy: j.acc, altitude: j.alt, speed: j.speed }, timestamp: j.t });
+    window.__nativeMotion = (m) => Recorder.onMotion(m);
     window.__nativeGeoErr = (m) => onErr(m === 'denied' ? { code: 1 } : { message: m });
-    AndroidBridge.startTracking();
+    AndroidBridge.startTracking(!!fresh);
   },
-  stop() { if (NATIVE) AndroidBridge.stopTracking(); window.__nativeFix = null; },
+  stop() { if (NATIVE) AndroidBridge.stopTracking(); window.__nativeFix = null; window.__nativeMotion = null; },
 };
 /* Simulatore: un giro in salita con soste, rumore GPS realistico. */
 const SimGeo = {
@@ -292,6 +295,7 @@ const SimGeo = {
       const acc = 4 + Math.random() * 5;
       this.bx = clamp((this.bx || 0) * 0.97 + n() * 0.8, -8, 8); this.by = clamp((this.by || 0) * 0.97 + n() * 0.8, -8, 8);
       this.bz = clamp((this.bz || 0) * 0.98 + n() * 0.9, -12, 12);
+      Recorder.onMotion({ t: Date.now(), steps: stopped ? 0 : 2, std: stopped ? 0.1 + Math.random() * 0.3 : 2 + Math.random() });
       onFix({ coords: { latitude: this.lat + (this.by + n() * 1.5) / 111320, longitude: this.lon + (this.bx + n() * 1.5) / 77000, altitude: this.alt + this.bz + n() * 1.5, accuracy: acc, speed: stopped ? Math.random() * 0.2 : speed + n() * 0.1 }, timestamp: Date.now() });
     }, 1000);
   },
@@ -417,6 +421,63 @@ const Wake = {
   off() { this.lock?.release?.(); this.lock = null; },
 };
 
+// ───────────────────────── Movimento del corpo (sensori) ─────────────────────────
+/* Il GPS da solo non distingue bene "fermo a parlare" da "cammino piano": la posizione
+ * balla di 5-20 m anche da fermi. I sensori del telefono invece sì: il contapassi
+ * (app Android) o, in mancanza, l'accelerometro. Un campione al secondo:
+ * { t, steps (passi nel secondo, null se non c'è il contapassi), std (agitazione, m/s²) }. */
+const Motion = {
+  buf: [], totalSteps: 0, web: null, acc: [], accT: 0,
+  reset() { this.buf = []; this.totalSteps = 0; },
+  push(m) {
+    if (!m || !Number.isFinite(m.t)) return;
+    const last = this.buf[this.buf.length - 1];
+    if (last && m.t <= last.t) return;
+    this.buf.push({ t: m.t, steps: m.steps == null ? null : +m.steps, std: +m.std || 0 });
+    if (m.steps > 0) this.totalSteps += +m.steps;
+    while (this.buf.length && this.buf[0].t < m.t - 180000) this.buf.shift();
+  },
+  // il contapassi è affidabile solo dopo che ha contato qualche passo in questa attività
+  get stepsTrusted() { return this.totalSteps >= 12; },
+  active(m) { return this.stepsTrusted && m.steps != null ? m.steps > 0 : m.std > 0.9; },
+  // sensori attivi e dati abbastanza lunghi da coprire la finestra
+  ready(now, win) {
+    const b = this.buf; if (!b.length || now - b[b.length - 1].t > 5000) return false;
+    return b[0].t <= now - win + 2000;
+  },
+  range(from, to) { return this.buf.filter((m) => m.t > from && m.t <= to); },
+  // istante in cui hai smesso di camminare: dopo l'ultimo secondo "attivo" seguito da un altro attivo
+  stopSince(now, win) {
+    const b = this.buf;
+    for (let i = b.length - 1; i > 0; i--) {
+      if (b[i].t < now - 120000) break;
+      if (this.active(b[i]) && this.active(b[i - 1])) return b[i].t + 1000;
+    }
+    return now - win;
+  },
+  // accelerometro del browser (web app, schermo acceso)
+  startWeb() {
+    if (NATIVE || this.web || !('DeviceMotionEvent' in window)) return;
+    this.acc = []; this.accT = Date.now();
+    this.web = (e) => {
+      const a = e.accelerationIncludingGravity; if (!a || a.x == null) return;
+      this.acc.push(Math.hypot(a.x, a.y, a.z));
+      const now = Date.now();
+      if (now - this.accT >= 1000) {
+        const n = this.acc.length;
+        if (n >= 5) {
+          const mean = this.acc.reduce((x, y) => x + y, 0) / n;
+          const std = Math.sqrt(this.acc.reduce((x, y) => x + (y - mean) ** 2, 0) / n);
+          Recorder.onMotion({ t: now, steps: null, std });
+        }
+        this.acc = []; this.accT = now;
+      }
+    };
+    window.addEventListener('devicemotion', this.web);
+  },
+  stopWeb() { if (this.web) window.removeEventListener('devicemotion', this.web); this.web = null; },
+};
+
 // ───────────────────────── Registratore ─────────────────────────
 /* Due tempi:
  *  - totalMs: tempo dall'avvio allo stop, esclusa solo la pausa MANUALE;
@@ -425,8 +486,12 @@ const Wake = {
  * cerchio poco più grande della precisione GPS, sei fermo. La pausa viene
  * retrodatata all'inizio della finestra, così il tempo in movimento è esatto. */
 const Recorder = {
-  state: null, timer: null, lastSave: 0, lastRender: 0,
+  state: null, timer: null, lastSave: 0, lastRender: 0, quiet: false,
   get type() { return TYPES[this.state.act.type]; },
+  // a piedi (trekking, camminata, corsa) le soste si riconoscono dai passi, non solo dal GPS
+  get footType() { return ['hike', 'walk', 'run'].includes(this.state.act.type); },
+  get motionWindow() { return this.state.act.type === 'run' ? 8000 : 12000; },
+  motionReady(now) { return this.footType && Motion.ready(now, 3000); },
 
   start(type) {
     const now = Date.now();
@@ -434,28 +499,58 @@ const Recorder = {
       id: uid(), type, name: defaultName(type, now), startTime: now, endTime: null,
       points: [], hr: [], rr: [], pauses: [], movingMs: 0, totalMs: 0, seg: 0, demApplied: false, source: settings.demo ? 'demo' : 'gps',
     };
-    this.state = { act, status: 'recording', autoPaused: false, lastTick: now, buf: [], lastFixAt: now, resumeHits: 0, pauseCenter: null };
-    this.begin();
+    this.state = { act, status: 'recording', autoPaused: false, lastTick: now, lastEvtT: now, buf: [], lastFixAt: now, resumeHits: 0, pauseCenter: null };
+    Motion.reset();
+    this.begin(true);
     vibrate(80);
   },
-  begin() {
+  begin(fresh) {
     this.kf = null;
-    if (this.type.gps) (settings.demo ? SimGeo : NATIVE ? NativeGeo : RealGeo).start((p) => this.onFix(p), (e) => this.onGeoErr(e));
+    if (this.type.gps) (settings.demo ? SimGeo : NATIVE ? NativeGeo : RealGeo).start((p) => this.onFix(p), (e) => this.onGeoErr(e), fresh);
+    if (this.type.gps && !settings.demo) Motion.startWeb();
     clearInterval(this.timer); this.timer = setInterval(() => this.tick(), 1000);
     Wake.on(); UI.recordMode(true); this.save(true); this.tick();
   },
+  /* Riprende un'attività dopo che l'interfaccia è stata chiusa (dal sistema, per memoria o batteria).
+   * Nell'app Android il servizio continua a registrare GPS e passi in un diario: li rigioca qui,
+   * così non si perde nulla di quello che è successo nel frattempo. */
   async restore(saved) {
+    Motion.reset();
     this.state = { ...saved, buf: [], resumeHits: 0, lastFixAt: Date.now() };
-    this.begin();
+    const s = this.state; s.lastEvtT ||= s.lastTick;
+    let replayed = 0;
+    if (NATIVE && AndroidBridge.readJournal) {
+      this.quiet = true;
+      try {
+        const evts = JSON.parse(AndroidBridge.readJournal(s.lastEvtT) || '[]');
+        for (const e of evts) if (this.replay(e)) replayed++;
+      } catch { /* diario illeggibile: si continua senza */ }
+      this.quiet = false;
+    }
+    if (!replayed && Date.now() - s.lastTick > 60000 && s.status === 'recording' && this.type.gps && settings.autoPause && !s.autoPaused) {
+      // nessun dato durante la chiusura: sosta provvisoria; alla prima posizione si capisce se ti eri spostato
+      s.pauseCenter = s.act.points[s.act.points.length - 1] || s.act.lastPos || null;
+      this.enterAutoPause(s.lastTick, s.lastTick, true);
+    }
+    this.begin(false);
+  },
+  replay(e) {
+    const s = this.state; if (!e || !(e.t > s.lastEvtT)) return false;
+    this.advance(e.t);
+    if (e.k === 'm') this.onMotion(e, e.t);
+    else this.onFix({ coords: { latitude: e.lat, longitude: e.lon, accuracy: e.acc, altitude: e.alt, speed: e.speed } }, e.t);
+    return true;
   },
   onGeoErr(e) {
     const msg = e.code === 1 ? 'Permesso posizione negato: abilitalo nelle impostazioni del browser.' : `GPS: ${e.message || 'errore'}`;
     toast(msg, 4000); UI.gps(null);
   },
-  onFix(pos) {
+  onFix(pos, at) {
     const s = this.state; if (!s) return;
-    const c = pos.coords, now = Date.now();
-    s.lastFixAt = now; UI.gps(c.accuracy); UI.liveMe(c.latitude, c.longitude, c.accuracy);
+    const c = pos.coords, now = at ?? Date.now();
+    s.lastEvtT = Math.max(s.lastEvtT || 0, at ?? (NATIVE && pos.timestamp ? pos.timestamp : now));
+    s.lastFixAt = now;
+    if (!this.quiet) { UI.gps(c.accuracy); UI.liveMe(c.latitude, c.longitude, c.accuracy); }
     const g = (s.act.gps ||= { fixes: 0, good: 0, best: null });
     g.fixes++; g.best = g.best == null ? Math.round(c.accuracy) : Math.min(g.best, Math.round(c.accuracy));
     s.act.lastPos = { lat: +c.latitude.toFixed(6), lon: +c.longitude.toFixed(6), acc: Math.round(c.accuracy) };
@@ -478,20 +573,32 @@ const Recorder = {
       if (dt > 0 && d / dt > this.type.maxSpeed && d > 2 * fix.acc + 10 && dt < 60) return; // salto anomalo
     }
 
+    // se i sensori dicono come ti muovi, il GPS serve solo come rete di sicurezza
+    const motion = this.motionReady(now);
     if (s.autoPaused) {
-      // ripartenza: due posizioni consecutive fuori dal cerchio di sosta, o velocità chiara
-      const r = Math.max(10, fix.acc * 0.8);
-      const away = s.pauseCenter && haversine(s.pauseCenter, raw) > r;
-      const fast = fix.spd != null && fix.spd > 0.6;
+      // ripartenza dal GPS: tre posizioni di fila ben fuori dal punto di sosta, o velocità chiara
+      const r = motion ? Math.max(25, fix.acc * 1.5) : Math.max(15, fix.acc);
+      const d = s.pauseCenter ? haversine(s.pauseCenter, raw) : 0;
+      const away = s.pauseCenter && d > r;
+      const fast = fix.spd != null && fix.spd > (motion ? 1.5 : 0.8);
       s.resumeHits = away || fast ? s.resumeHits + 1 : 0;
-      if (s.resumeHits >= 2) {
-        // la ripartenza è avvenuta qualche secondo prima di quando la confermiamo: la retrodatiamo
-        const spd = fix.spd != null && fix.spd > 0.4 ? fix.spd : 1.1;
-        this.exitAutoPause(now, clamp(haversine(s.pauseCenter, raw) / spd * 1000, 0, 20000));
-      } else return;
-    } else if (settings.autoPause && this.isStationary(now)) {
-      this.enterAutoPause(now - win);
+      if (s.resumeHits < 3) return;
+      // la ripartenza è avvenuta qualche secondo prima di quando la confermiamo: la retrodatiamo
+      const spd = fix.spd != null && fix.spd > 0.4 ? fix.spd : 1.1;
+      const p = act.pauses[act.pauses.length - 1];
+      this.exitAutoPause(now, p?.gap ? d / spd * 1000 : clamp(d / spd * 1000, 0, 20000));
+    } else if (settings.autoPause && !motion && this.isStationary(now)) {
+      this.enterAutoPause(now - win, now);
       return;
+    }
+
+    // dopo una chiusura senza dati: se ti eri spostato, quel tempo era in movimento
+    if (s.gapCredit != null) {
+      const p = act.pauses[s.gapCredit]; s.gapCredit = null;
+      if (p?.end && last) {
+        const credit = Math.min(p.end - p.start, haversine(last, fix) / 1.2 * 1000);
+        if (credit > 20000) { p.end -= credit; act.movingMs += credit; }
+      }
     }
 
     // aggiunge il punto solo se lo spostamento supera il rumore GPS
@@ -499,64 +606,109 @@ const Recorder = {
       this.addPoint(fix);
     }
   },
+  /* Solo GPS (bici, o telefono senza sensori): fermo se la velocità Doppler è bassa e la
+   * posizione media non si sposta più del "tremolio" del GPS. */
   isStationary(now) {
     const s = this.state, win = this.type.pauseWindow * 1000;
     const pts = s.buf.filter((p) => p.t >= now - win);
     if (!pts.length || pts[0].t > now - win + 3000) return false; // finestra non ancora coperta
     if (pts.length < 3) return false;
     const median = (arr) => { const v = [...arr].sort((a, b) => a - b); return v[v.length >> 1]; };
-    const avg = (arr) => ({ lat: arr.reduce((a, p) => a + p.lat, 0) / arr.length, lon: arr.reduce((a, p) => a + p.lon, 0) / arr.length });
     // 1) velocità misurata dal GPS (effetto Doppler): affidabile anche quando la posizione è imprecisa
     const spds = pts.map((p) => p.spd).filter((v) => v != null && Number.isFinite(v));
-    if (spds.length >= pts.length * 0.6 && median(spds) > 0.35) return false;
+    if (spds.length >= pts.length * 0.6 && median(spds) > 0.5) return false;
     // 2) spostamento netto tra la posizione media di inizio e di fine finestra (la media annulla il "tremolio")
     const third = Math.max(1, Math.floor(pts.length / 3));
-    const disp = haversine(avg(pts.slice(0, third)), avg(pts.slice(-third)));
+    const disp = haversine(avgPos(pts.slice(0, third)), avgPos(pts.slice(-third)));
     const acc = median(pts.map((p) => p.acc));
-    if (disp >= Math.max(5, acc * 0.3)) return false;
-    s.pauseCenter = avg(pts);
+    if (disp >= Math.max(8, acc * 0.5)) return false;
+    s.pauseCenter = avgPos(pts);
     return true;
+  },
+  // il GPS dice chiaramente che ti stai spostando (es. sensori che non contano i passi)
+  gpsSaysMoving(now) {
+    const pts = this.state.buf.filter((p) => p.t >= now - 10000);
+    const spds = pts.map((p) => p.spd).filter((v) => v != null && Number.isFinite(v)).sort((a, b) => a - b);
+    return pts.length >= 4 && spds.length >= pts.length * 0.6 && spds[spds.length >> 1] > 1.0;
+  },
+  onMotion(m, at) {
+    const s = this.state; if (!s || !m) return;
+    Motion.push(m);
+    s.lastEvtT = Math.max(s.lastEvtT || 0, m.t);
+    this.checkMotion(at ?? Date.now());
+  },
+  /* Soste dai passi: fermo quando per 12 s (8 s in corsa) non fai passi; ripartito dopo
+   * 3 secondi di cammino negli ultimi 4. Qualche passo per girarti mentre parli non conta. */
+  checkMotion(now) {
+    const s = this.state;
+    if (!settings.autoPause || !this.type.gps || s.status !== 'recording' || !this.footType) return;
+    const win = this.motionWindow;
+    if (s.autoPaused) {
+      if (!Motion.ready(now, 4000)) return;
+      const walk = Motion.range(now - 4000, now).filter((m) => Motion.active(m));
+      if (walk.length >= 3) this.exitAutoPause(now, now - walk[0].t + 1000);
+    } else {
+      if (!Motion.ready(now, win)) return;
+      const active = Motion.range(now - win, now).filter((m) => Motion.active(m)).length;
+      if (active > 1 || this.gpsSaysMoving(now)) return;
+      const recent = s.buf.filter((p) => p.t >= now - 10000);
+      s.pauseCenter = recent.length ? avgPos(recent) : s.act.points[s.act.points.length - 1] || s.act.lastPos || null;
+      this.enterAutoPause(Motion.stopSince(now, win), now);
+    }
   },
   addPoint(fix) {
     const s = this.state, act = s.act;
     const p = { t: fix.t, lat: fix.lat, lon: fix.lon, alt: fix.alt, acc: fix.acc, mt: Math.round(act.movingMs), seg: act.seg };
     const hr = HR.fresh; if (hr) p.hr = hr;
     act.points.push(p);
-    UI.liveTrackAdd(p);
-    this.save();
+    if (!this.quiet) { UI.liveTrackAdd(p); this.save(); }
   },
-  enterAutoPause(since) {
+  enterAutoPause(since, now = Date.now(), gap = false) {
     const s = this.state, act = s.act; if (s.autoPaused) return;
-    const now = Date.now();
-    since = Math.max(since, act.pauses.length ? (act.pauses[act.pauses.length - 1].end || since) : since, act.startTime);
+    this.advance(now);
+    since = Math.min(now, Math.max(since, act.pauses.length ? (act.pauses[act.pauses.length - 1].end || since) : since, act.startTime));
     s.autoPaused = true; s.resumeHits = 0;
     act.movingMs = Math.max(0, act.movingMs - (now - since));
     // rimuove i punti "di rumore" registrati da fermo
     while (act.points.length > 1 && act.points[act.points.length - 1].t > since && act.points[act.points.length - 1].seg === act.seg) act.points.pop();
-    act.pauses.push({ start: since, end: null, auto: true, lat: s.pauseCenter?.lat, lon: s.pauseCenter?.lon });
+    act.pauses.push({ start: since, end: null, auto: true, lat: s.pauseCenter?.lat, lon: s.pauseCenter?.lon, ...(gap ? { gap: true } : {}) });
+    if (this.quiet) return;
     UI.liveTrackRedraw();
     vibrate([60, 80, 60]); toast('⏸ Sosta rilevata: tempo in movimento fermo');
     this.save(true); this.render(true);
   },
-  exitAutoPause(now, retro = 0) {
+  exitAutoPause(now = Date.now(), retro = 0) {
     const s = this.state; if (!s.autoPaused) return;
+    this.advance(now);
     s.autoPaused = false; s.resumeHits = 0; s.buf = [];
-    const p = s.act.pauses[s.act.pauses.length - 1];
-    if (p && !p.end) { retro = Math.min(retro, Math.max(0, now - p.start)); p.end = now - retro; s.act.movingMs += retro; }
+    const i = s.act.pauses.length - 1, p = s.act.pauses[i];
+    if (p && !p.end) {
+      retro = Math.min(retro, Math.max(0, now - p.start)); p.end = now - retro; s.act.movingMs += retro;
+      if (p.gap) s.gapCredit = i;
+    }
+    if (this.quiet) return;
     vibrate(120); toast('▶ Ripartito');
     this.save(true); this.render(true);
   },
+  // conta il tempo fino a "now": totale sempre (salvo pausa manuale), in movimento se non in sosta
+  advance(now) {
+    const s = this.state; if (now <= s.lastTick) return;
+    const dt = now - s.lastTick; s.lastTick = now;
+    if (s.status !== 'recording') return;
+    s.act.totalMs += dt;
+    if (!s.autoPaused) s.act.movingMs += dt;
+  },
   tick() {
     const s = this.state; if (!s) return;
-    const now = Date.now(), dt = now - s.lastTick; s.lastTick = now;
+    const now = Date.now();
+    this.advance(now);
     if (s.status === 'recording') {
-      s.act.totalMs += dt;
-      if (!s.autoPaused) s.act.movingMs += dt;
+      this.checkMotion(now);
       // alcuni telefoni smettono di inviare posizioni quando sei fermo: lo consideriamo una sosta
-      if (this.type.gps && settings.autoPause && !s.autoPaused && s.act.points.length &&
+      if (this.type.gps && settings.autoPause && !s.autoPaused && s.act.points.length && !this.motionReady(now) &&
           now - s.lastFixAt > this.type.pauseWindow * 1500) {
         s.pauseCenter = s.act.points[s.act.points.length - 1];
-        this.enterAutoPause(s.lastFixAt);
+        this.enterAutoPause(s.lastFixAt, now);
       }
     }
     this.render();
@@ -570,6 +722,7 @@ const Recorder = {
   },
   togglePause() {
     const s = this.state, now = Date.now();
+    this.advance(now);
     if (s.status === 'recording') {
       if (s.autoPaused) { const p = s.act.pauses[s.act.pauses.length - 1]; if (p && !p.end) p.end = now; s.autoPaused = false; }
       s.status = 'paused'; s.act.pauses.push({ start: now, end: null, auto: false });
@@ -599,7 +752,7 @@ const Recorder = {
   },
   async discard() { this.teardown(); toast('Attività scartata'); },
   teardown() {
-    RealGeo.stop(); SimGeo.stop(); NativeGeo.stop(); clearInterval(this.timer); this.timer = null;
+    RealGeo.stop(); SimGeo.stop(); NativeGeo.stop(); Motion.stopWeb(); Motion.reset(); clearInterval(this.timer); this.timer = null;
     this.state = null; Wake.off(); DB.kvDel('current'); UI.recordMode(false);
   },
   save(force) {
@@ -1646,12 +1799,16 @@ async function main() {
 
   // recupero di un'attività interrotta (app chiusa, crash, batteria…)
   const cur = await DB.kvGet('current').catch(() => null);
-  if (cur?.act) {
+  if (cur?.act && Date.now() - (cur.lastTick || cur.act.startTime) < 12 * 3600e3) {
+    // l'app è stata chiusa dal sistema (memoria, batteria…) durante la registrazione: si riprende da sola
+    await Recorder.restore(cur); UI.liveTrackRedraw(); showView('record');
+    toast('▶ Registrazione ripresa');
+  } else if (cur?.act) {
     const r = await dialog(`C'è un'attività in corso iniziata alle ${fmtTime(cur.act.startTime)} (${fmtKm(computeStats(cur.act).distance)} km).`, [
       { label: 'Scarta', value: 'discard', cls: 'btn-danger-ghost' }, { label: 'Salva e chiudi', value: 'save' }, { label: 'Riprendi', value: 'resume', cls: 'btn-primary' }]);
     if (r === 'resume') { await Recorder.restore(cur); UI.liveTrackRedraw(); }
     else if (r === 'save') { Recorder.state = { ...cur, buf: [] }; await Recorder.stop(); }
-    else await DB.kvDel('current');
+    else { await DB.kvDel('current'); if (NATIVE) AndroidBridge.stopTracking(); }
   }
 
   if (NATIVE) setupNative();
