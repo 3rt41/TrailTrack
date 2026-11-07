@@ -4,9 +4,12 @@ Web app (PWA) installabile sul telefono, senza server: tutti i dati restano sul 
 
 ## Funzioni
 - **Avvia / Pausa / Stop** per trekking, camminata, corsa, bici e allenamento al chiuso (senza GPS).
-- **Pausa automatica**: se per 10–30 s (in base all'attività) tutte le posizioni restano in un cerchio
-  di pochi metri, l'app capisce che sei fermo, ferma il *tempo in movimento* (retrodatandolo all'inizio
-  della sosta) e lascia correre il *tempo totale*. Riparte da sola appena ti allontani.
+- **Pausa automatica**: a piedi usa il **contapassi** del telefono (o l'accelerometro): se per 12 s (8 s in corsa)
+  non fai passi sei fermo, anche se il GPS "balla" — ad esempio mentre parli con qualcuno. Il *tempo in movimento*
+  si ferma retrodatato all'ultimo passo e riparte da solo dopo 3 secondi di cammino. In bici, o senza sensori,
+  decide il GPS (velocità Doppler e spostamento medio).
+- **Non si interrompe**: se Android chiude l'app per liberare memoria, il servizio continua a registrare GPS e passi;
+  riaprendo l'app l'attività riprende da sola con tutti i dati, senza premere nulla.
 - **GPS preciso**: scarta posizioni imprecise e salti anomali, filtro di Kalman contro il "tremolio".
 - **Dislivello**: quota GPS smussata con isteresi; nel dettaglio puoi **correggere le quote con il DEM**
   (modello del terreno Copernicus via Open-Meteo) per un D+ più affidabile.

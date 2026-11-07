@@ -1,5 +1,5 @@
 // Service worker: app utilizzabile offline + cache delle mappe già viste.
-const SHELL = 'trailtrack-shell-v3';
+const SHELL = 'trailtrack-shell-v4';
 const TILES = 'trailtrack-tiles-v1';
 const MAX_TILES = 3000;
 const ASSETS = [

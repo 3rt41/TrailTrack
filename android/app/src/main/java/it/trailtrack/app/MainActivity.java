@@ -14,8 +14,10 @@ import android.os.Environment;
 import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.provider.Settings;
+import android.view.ViewGroup;
 import android.webkit.GeolocationPermissions;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -61,7 +63,13 @@ public class MainActivity extends Activity {
         instance = this;
         getWindow().setStatusBarColor(Color.parseColor("#0F1A14"));
         getWindow().setNavigationBarColor(Color.parseColor("#0F1A14"));
+        hr = new HeartRateManager(this);
+        createWeb();
+    }
 
+    /** Crea la WebView con l'interfaccia. Richiamata anche se il sistema ne chiude il processo. */
+    @SuppressLint("SetJavaScriptEnabled")
+    void createWeb() {
         web = new WebView(this);
         web.setBackgroundColor(Color.parseColor("#0F1A14"));
         setContentView(web);
@@ -75,7 +83,6 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setUserAgentString(s.getUserAgentString() + " TrailTrackAndroid/" + versionName());
 
-        hr = new HeartRateManager(this);
         web.addJavascriptInterface(new Bridge(), "AndroidBridge");
 
         web.setWebViewClient(new WebViewClient() {
@@ -91,6 +98,20 @@ public class MainActivity extends Activity {
                 } catch (Exception e) {
                     return new WebResourceResponse("text/plain", "utf-8", 404, "Not found", null, null);
                 }
+            }
+
+            // Il sistema può chiudere il "motore" della pagina per liberare memoria (frequente a schermo
+            // spento). Senza gestirlo, Android chiuderebbe tutta l'app e la registrazione: invece si
+            // ricrea l'interfaccia, che riprende da sola l'attività in corso con i dati del servizio.
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                if (view != web) return true;
+                ViewGroup parent = (ViewGroup) view.getParent();
+                if (parent != null) parent.removeView(view);
+                view.destroy();
+                web = null;
+                if (!isFinishing() && !isDestroyed()) createWeb();
+                return true;
             }
 
             @Override
@@ -186,13 +207,16 @@ public class MainActivity extends Activity {
         public boolean isNative() { return true; }
 
         @JavascriptInterface
-        public void startTracking() {
+        public void startTracking(boolean fresh) {
             runOnUiThread(() -> {
                 List<String> perms = new ArrayList<>(locationPerms());
                 if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS);
+                // contapassi: per capire quando sei fermo e quando riparti
+                if (Build.VERSION.SDK_INT >= 29) perms.add(Manifest.permission.ACTIVITY_RECOGNITION);
                 withPermissions(perms, () -> {
                     if (!hasAll(locationPerms())) { jsCall("__nativeGeoErr", "'denied'"); return; }
                     Intent i = new Intent(MainActivity.this, TrackingService.class);
+                    i.putExtra(TrackingService.EXTRA_FRESH, fresh);
                     startForegroundService(i);
                 }, () -> jsCall("__nativeGeoErr", "'denied'"));
             });
@@ -200,8 +224,15 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void stopTracking() {
-            runOnUiThread(() -> stopService(new Intent(MainActivity.this, TrackingService.class)));
+            runOnUiThread(() -> {
+                stopService(new Intent(MainActivity.this, TrackingService.class));
+                TrackingService.clearJournal(MainActivity.this);
+            });
         }
+
+        /** Posizioni e passi registrati dal servizio dopo l'istante "since" (ms). */
+        @JavascriptInterface
+        public String readJournal(double since) { return TrackingService.readJournal(MainActivity.this, (long) since); }
 
         @JavascriptInterface
         public void updateNotification(String text) { TrackingService.updateText(text); }
@@ -304,6 +335,7 @@ public class MainActivity extends Activity {
             // le notifiche sono facoltative: senza, la registrazione funziona comunque
             if (Manifest.permission.POST_NOTIFICATIONS.equals(permissions[i])) continue;
             if (Manifest.permission.ACCESS_COARSE_LOCATION.equals(permissions[i])) continue;
+            if (Manifest.permission.ACTIVITY_RECOGNITION.equals(permissions[i])) continue;
             if (results[i] != PackageManager.PERMISSION_GRANTED) essentialOk = false;
         }
         Runnable r = essentialOk ? pendingGranted : pendingDenied;
@@ -340,6 +372,7 @@ public class MainActivity extends Activity {
     @SuppressWarnings("deprecation")
     @Override
     public void onBackPressed() {
+        if (web == null) { moveTaskToBack(true); return; }
         web.evaluateJavascript("window.__nativeBack ? window.__nativeBack() : false", v -> {
             if (!"true".equals(v)) moveTaskToBack(true);
         });
@@ -349,9 +382,9 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         hr.disconnect();
         hr.release();
-        stopService(new Intent(this, TrackingService.class));
+        // la registrazione NON si ferma: il servizio continua e l'app, riaperta, riprende da sola
         if (instance == this) instance = null;
-        web.destroy();
+        if (web != null) web.destroy();
         web = null;
         super.onDestroy();
     }
